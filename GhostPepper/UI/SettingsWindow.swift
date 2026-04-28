@@ -1818,55 +1818,44 @@ struct SettingsView: View {
     private var crossMeetingQACard: some View {
         SettingsCard("Cross-Meeting Q&A") {
             VStack(alignment: .leading, spacing: 14) {
-                Text("Choose how to answer questions across all your meeting transcripts. Local runs entirely on-device; Claude API uses Anthropic's cloud (sends meeting context with each question).")
+                Text("Ask questions across all meeting transcripts. The assistant searches your archive with grep / read_file / list_dir and cites sources.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                Picker("Backend", selection: $appState.meetingQABackend) {
-                    ForEach(QABackendKind.allCases) { backend in
-                        Text(backend.displayName).tag(backend.rawValue)
+                Picker("Provider", selection: .constant(LLMProviderKind.anthropic)) {
+                    ForEach(LLMProviderKind.allCases) { provider in
+                        Text(provider.displayName).tag(provider)
                     }
                 }
 
-                if (QABackendKind(rawValue: appState.meetingQABackend) ?? .local) == .local {
-                    Picker("Local model", selection: $appState.meetingQAModelKind) {
-                        ForEach(TextCleanupManager.cleanupModels, id: \.kind) { model in
-                            Text(model.displayName).tag(model.kind.rawValue)
-                        }
+                Picker("Model", selection: $appState.claudeAPIModel) {
+                    ForEach(ClaudeAPIModel.allCases) { model in
+                        Text(model.displayName).tag(model.rawValue)
                     }
-                    Text("If the selected model isn't downloaded, the loaded cleanup model is used as a fallback. Download models in Settings → Models.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Picker("Claude model", selection: $appState.claudeAPIModel) {
-                        ForEach(ClaudeAPIModel.allCases) { model in
-                            Text(model.displayName).tag(model.rawValue)
-                        }
-                    }
+                }
 
-                    HStack(spacing: 8) {
-                        SecureField("sk-ant-...", text: $claudeAPIKeyInput)
-                            .textFieldStyle(.roundedBorder)
-                            .onChange(of: claudeAPIKeyInput) { _, _ in
-                                claudeAPIKeySaved = false
-                            }
-                        Button(claudeAPIKeySaved ? "Saved" : "Save") {
-                            _ = KeychainHelper.set(claudeAPIKeyInput, for: AnthropicProvider.keychainKey)
-                            claudeAPIKeySaved = true
-                        }
-                        .disabled(claudeAPIKeyInput.isEmpty)
-                        Button("Clear") {
-                            KeychainHelper.delete(AnthropicProvider.keychainKey)
-                            claudeAPIKeyInput = ""
+                HStack(spacing: 8) {
+                    SecureField("sk-ant-...", text: $claudeAPIKeyInput)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: claudeAPIKeyInput) { _, _ in
                             claudeAPIKeySaved = false
                         }
-                        .disabled(claudeAPIKeyInput.isEmpty && !claudeAPIKeySaved)
+                    Button(claudeAPIKeySaved ? "Saved" : "Save") {
+                        _ = KeychainHelper.set(claudeAPIKeyInput, for: AnthropicProvider.keychainKey)
+                        claudeAPIKeySaved = true
                     }
-
-                    Text("API key is stored in your macOS Keychain. Get one at [console.anthropic.com](https://console.anthropic.com/settings/keys).")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    .disabled(claudeAPIKeyInput.isEmpty)
+                    Button("Clear") {
+                        KeychainHelper.delete(AnthropicProvider.keychainKey)
+                        claudeAPIKeyInput = ""
+                        claudeAPIKeySaved = false
+                    }
+                    .disabled(claudeAPIKeyInput.isEmpty && !claudeAPIKeySaved)
                 }
+
+                Text("API key is stored in your macOS Keychain. Get one at [console.anthropic.com](https://console.anthropic.com/settings/keys). Cost is shown after each answer; prompt caching keeps follow-up questions cheap.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }

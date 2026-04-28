@@ -61,7 +61,6 @@ enum LocalCleanupModelKind: String, CaseIterable, Equatable, Identifiable {
 
     static var fast: LocalCleanupModelKind { .qwen35_2b_q4_k_m }
     static var full: LocalCleanupModelKind { .qwen35_4b_q4_k_m }
-    static var qa: LocalCleanupModelKind { .qwen3_8b_q4_k_m }
 }
 
 struct CleanupModelDescriptor: Equatable {

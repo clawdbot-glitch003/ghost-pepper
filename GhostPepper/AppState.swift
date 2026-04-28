@@ -85,8 +85,6 @@ class AppState: ObservableObject {
     @AppStorage("meetingAutoDetectEnabled") var meetingAutoDetectEnabled: Bool = true
     @AppStorage("meetingWindowFloatsWhileRecording") var meetingWindowFloatsWhileRecording: Bool = true
     @AppStorage("meetingSummaryPrompt") var meetingSummaryPrompt: String = MeetingSummaryGenerator.defaultPrompt
-    @AppStorage("meetingQAModelKind") var meetingQAModelKind: String = LocalCleanupModelKind.qwen35_2b_q4_k_m.rawValue
-    @AppStorage("meetingQABackend") var meetingQABackend: String = QABackendKind.claudeAPI.rawValue
     @AppStorage("claudeAPIModel") var claudeAPIModel: String = ClaudeAPIModel.sonnet.rawValue
     @AppStorage("pauseMediaWhileRecording") var pauseMediaWhileRecording: Bool = true
     @Published private(set) var pushToTalkChord: KeyChord
@@ -1020,48 +1018,35 @@ class AppState: ObservableObject {
         controller.onGenerateSummary = { [weak self] transcript in
             Task { await self?.generateMeetingSummary(for: transcript) }
         }
-        controller.onAskQuestion = { [weak self] question, _ in
+        controller.onAskQuestion = { [weak self] question in
             AsyncThrowingStream { continuation in
                 guard let self else {
                     continuation.finish()
                     return
                 }
-                let backend = QABackendKind(rawValue: self.meetingQABackend) ?? .claudeAPI
-                switch backend {
-                case .claudeAPI:
-                    guard let key = KeychainHelper.get(AnthropicProvider.keychainKey), !key.isEmpty else {
-                        Task { @MainActor in self.showSettings(section: .meetingTranscript) }
-                        continuation.yield(.text("Add your Claude API key to continue — Settings opened."))
-                        continuation.finish()
-                        return
-                    }
-                    let model = ClaudeAPIModel(rawValue: self.claudeAPIModel) ?? .sonnet
-                    let provider = AnthropicProvider(model: model, apiKey: key)
-                    let archiveRoot = MeetingTranscriptSettings.effectiveSaveDirectory()
-                    let agent = MeetingQAAgent(provider: provider, model: model, archiveRoot: archiveRoot, maxIterations: 15)
-                    let task = Task {
-                        do {
-                            for try await event in agent.ask(question) {
-                                switch event {
-                                case .text(let s): continuation.yield(.text(s))
-                                case .usage(let u): continuation.yield(.usage(u))
-                                case .status, .toolCall, .toolResult, .error:
-                                    // Older UI ignores these. Surfaced fully in Task 13.
-                                    break
-                                }
-                            }
-                            continuation.finish()
-                        } catch {
-                            self.debugLogStore.record(category: .model, message: "Agentic Q&A error: \(error)")
-                            continuation.yield(.text("\nClaude API error: \(error.localizedDescription)"))
-                            continuation.finish()
-                        }
-                    }
-                    continuation.onTermination = { _ in task.cancel() }
-                case .local:
-                    continuation.yield(.text("Local cross-meeting Q&A isn't supported — switch to Claude API in Settings → Meeting Transcript → Cross-Meeting Q&A."))
+                guard let key = KeychainHelper.get(AnthropicProvider.keychainKey), !key.isEmpty else {
+                    Task { @MainActor in self.showSettings(section: .meetingTranscript) }
+                    continuation.yield(.error("Add your Claude API key to continue — Settings opened."))
                     continuation.finish()
+                    return
                 }
+                let model = ClaudeAPIModel(rawValue: self.claudeAPIModel) ?? .sonnet
+                let provider = AnthropicProvider(model: model, apiKey: key)
+                let archiveRoot = MeetingTranscriptSettings.effectiveSaveDirectory()
+                let agent = MeetingQAAgent(provider: provider, model: model, archiveRoot: archiveRoot, maxIterations: 15)
+                let task = Task {
+                    do {
+                        for try await event in agent.ask(question) {
+                            continuation.yield(event)
+                        }
+                        continuation.finish()
+                    } catch {
+                        self.debugLogStore.record(category: .model, message: "Agentic Q&A error: \(error)")
+                        continuation.yield(.error("Claude API error: \(error.localizedDescription)"))
+                        continuation.finish()
+                    }
+                }
+                continuation.onTermination = { _ in task.cancel() }
             }
         }
         return controller
