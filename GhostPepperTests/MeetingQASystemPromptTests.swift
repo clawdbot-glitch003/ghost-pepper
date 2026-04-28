@@ -2,8 +2,43 @@ import XCTest
 @testable import GhostPepper
 
 final class MeetingQASystemPromptTests: XCTestCase {
-    // Tests added in subsequent tasks.
-    func testStubCompiles() {
-        XCTAssertTrue(true)
+    func testPromptInterpolatesArchiveRoot() {
+        let prompt = MeetingQASystemPrompt.build(archiveRootPath: "/tmp/Meetings")
+        XCTAssertTrue(prompt.contains("Root: /tmp/Meetings"), prompt)
+    }
+
+    func testPromptDescribesGranolaFormat() {
+        let prompt = MeetingQASystemPrompt.build(archiveRootPath: "/tmp/Meetings")
+        XCTAssertTrue(prompt.contains("Granola-imported"), prompt)
+        XCTAssertTrue(prompt.contains("YAML frontmatter"), prompt)
+    }
+
+    func testPromptDescribesNativeFormat() {
+        let prompt = MeetingQASystemPrompt.build(archiveRootPath: "/tmp/Meetings")
+        XCTAssertTrue(prompt.contains("Native Ghost Pepper"), prompt)
+        XCTAssertTrue(prompt.contains("**Date:**"), prompt)
+        XCTAssertTrue(prompt.contains("## Notes"), prompt)
+    }
+
+    func testPromptRequiresCitations() {
+        let prompt = MeetingQASystemPrompt.build(archiveRootPath: "/tmp/Meetings")
+        XCTAssertTrue(prompt.contains("cite"), prompt)
+        XCTAssertTrue(prompt.contains("path:line"), prompt)
+    }
+
+    func testPromptHasVoiceToTextGuidance() {
+        let prompt = MeetingQASystemPrompt.build(archiveRootPath: "/tmp/Meetings")
+        XCTAssertTrue(prompt.contains("voice-to-text") || prompt.contains("Voice-to-text"), prompt)
+        XCTAssertTrue(prompt.contains("Neville Jun"), "Should include the canonical artifact example")
+    }
+
+    func testPromptDescribesMultiHopGuidance() {
+        let prompt = MeetingQASystemPrompt.build(archiveRootPath: "/tmp/Meetings")
+        XCTAssertTrue(prompt.contains("multi-hop") || prompt.contains("Multi-hop") || prompt.contains("know each other"), prompt)
+    }
+
+    func testPromptDescribesIterationBudget() {
+        let prompt = MeetingQASystemPrompt.build(archiveRootPath: "/tmp/Meetings")
+        XCTAssertTrue(prompt.contains("15"), "Iteration cap should be visible to the model")
     }
 }
