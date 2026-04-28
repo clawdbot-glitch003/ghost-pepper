@@ -73,6 +73,44 @@ struct MeetingQATools {
         return output
     }
 
+    // MARK: - read_file
+
+    func readFile(path: String, offset: Int, limit: Int) async throws -> String {
+        let resolved = try PathSandbox.resolveSafe(path, root: root)
+        guard FileManager.default.fileExists(atPath: resolved.path) else {
+            throw MeetingQAToolError.fileNotFound(path)
+        }
+        let content: String
+        do {
+            content = try String(contentsOf: resolved, encoding: .utf8)
+        } catch {
+            throw MeetingQAToolError.readFailed("\(path): \(error.localizedDescription)")
+        }
+
+        let lines = content.split(separator: "\n", omittingEmptySubsequences: false).map { String($0) }
+        let totalLines = lines.count
+        let safeOffset = max(1, offset)
+        let safeLimit = max(1, min(limit, 1000))
+
+        let startIndex = safeOffset - 1
+        guard startIndex < totalLines else {
+            return "(File has \(totalLines) lines; requested offset=\(safeOffset) is past end of file.)"
+        }
+        let endExclusive = min(startIndex + safeLimit, totalLines)
+        let slice = lines[startIndex..<endExclusive]
+        let numbered = slice.enumerated().map { (i, line) in
+            "\(safeOffset + i)\t\(line)"
+        }.joined(separator: "\n")
+
+        let footer: String
+        if endExclusive >= totalLines {
+            footer = "\n\n(End of file at line \(totalLines).)"
+        } else {
+            footer = "\n\n(Returned lines \(safeOffset)-\(endExclusive) of \(totalLines). Use offset=\(endExclusive + 1) to continue.)"
+        }
+        return numbered + footer
+    }
+
     // MARK: - Process plumbing
 
     private struct ProcessResult {

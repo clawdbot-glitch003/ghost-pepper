@@ -68,4 +68,54 @@ final class MeetingQAToolsTests: XCTestCase {
             XCTFail("Unexpected error: \(error)")
         }
     }
+
+    // MARK: - read_file
+
+    func testReadFileReturnsRequestedSliceWithLineNumbers() async throws {
+        let tools = MeetingQATools(root: rootDir)
+        let result = try await tools.readFile(path: "2025-01-29/denis-matt.md", offset: 1, limit: 200)
+        XCTAssertTrue(result.hasPrefix("1\t---\n"), "Expected line 1 prefix, got: \(result.prefix(30))")
+        XCTAssertTrue(result.contains("2\ttitle: \"Denis <> Matt\""), "Expected line 2: \(result)")
+        XCTAssertTrue(result.contains("(End of file at line"), "Expected end-of-file footer: \(result)")
+    }
+
+    func testReadFileWithOffsetSkipsEarlierLines() async throws {
+        let tools = MeetingQATools(root: rootDir)
+        let result = try await tools.readFile(path: "2025-01-29/denis-matt.md", offset: 5, limit: 1)
+        let firstLine = result.split(separator: "\n").first ?? ""
+        XCTAssertTrue(firstLine.hasPrefix("5\t"), "Expected line 5 prefix, got: \(firstLine)")
+    }
+
+    func testReadFilePaginationFooterWhenMoreLinesExist() async throws {
+        let big = (1...50).map { "line \($0)" }.joined(separator: "\n")
+        let url = rootDir.appendingPathComponent("2025-01-29/big.md")
+        try big.write(to: url, atomically: true, encoding: .utf8)
+        let tools = MeetingQATools(root: rootDir)
+        let result = try await tools.readFile(path: "2025-01-29/big.md", offset: 1, limit: 10)
+        XCTAssertTrue(result.contains("(Returned lines 1-10 of 50. Use offset=11 to continue.)"), result)
+    }
+
+    func testReadFileRejectsPathOutsideRoot() async {
+        let tools = MeetingQATools(root: rootDir)
+        do {
+            _ = try await tools.readFile(path: "../outside.md", offset: 1, limit: 200)
+            XCTFail("Expected pathOutsideRoot error")
+        } catch is PathSandboxError {
+            // expected
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testReadFileMissingFileThrows() async {
+        let tools = MeetingQATools(root: rootDir)
+        do {
+            _ = try await tools.readFile(path: "nope.md", offset: 1, limit: 200)
+            XCTFail("Expected fileNotFound error")
+        } catch let error as MeetingQAToolError {
+            guard case .fileNotFound = error else { XCTFail("Wrong error: \(error)"); return }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
 }
