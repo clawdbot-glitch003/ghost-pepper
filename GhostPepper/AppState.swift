@@ -1347,6 +1347,7 @@ class AppState: ObservableObject {
             activeMeetingSession = nil
         }
         debugLogStore.record(category: .model, message: "\(logPrefix): \(session.transcript.meetingName)")
+        NotificationCenter.default.post(name: .meetingRecordingStopped, object: nil)
     }
 
     private var shortcutBindings: [ChordAction: KeyChord] {

@@ -5,6 +5,7 @@ import ServiceManagement
 
 extension Notification.Name {
     static let showSettingsSection = Notification.Name("showSettingsSection")
+    static let meetingRecordingStopped = Notification.Name("meetingRecordingStopped")
 }
 
 final class SettingsWindowController: NSObject, NSWindowDelegate {

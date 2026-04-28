@@ -795,6 +795,10 @@ struct MeetingRootView: View {
             Task { await loadTodayEvents() }
             refreshGranolaPendingCount()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .meetingRecordingStopped)) { _ in
+            GoogleCalendarService.shared.invalidateTodayCache()
+            Task { await loadTodayEvents() }
+        }
     }
 
     private var granolaSyncRow: some View {
