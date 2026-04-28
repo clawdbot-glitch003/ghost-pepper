@@ -21,7 +21,7 @@ final class MeetingTranscriptWindowController: NSObject, NSWindowDelegate {
     var onStartRecording: ((_ name: String, _ detectedMeeting: DetectedMeeting?) -> MeetingSession?)?
     var onStopRecording: ((MeetingSession) -> Void)?
     var onGenerateSummary: ((MeetingTranscript) -> Void)?
-    var onAskQuestion: ((_ question: String, _ context: String) -> AsyncThrowingStream<QAStreamEvent, Error>)?
+    var onAskQuestion: ((_ question: String) -> AsyncThrowingStream<QAEvent, Error>)?
     var shouldFloatWhileRecording: () -> Bool = { false }
 
     private(set) var windowState: MeetingWindowState?
@@ -179,7 +179,7 @@ enum MeetingSurface: Equatable {
 
 @MainActor
 final class MeetingWindowState: ObservableObject {
-    var onAskQuestion: ((_ question: String, _ context: String) -> AsyncThrowingStream<QAStreamEvent, Error>)?
+    var onAskQuestion: ((_ question: String) -> AsyncThrowingStream<QAEvent, Error>)?
     @Published var tabs: [OpenMeetingTab] = []
     @Published var selectedSurface: MeetingSurface = .home
     @Published var showSidebar = true
@@ -387,8 +387,11 @@ struct MeetingRootView: View {
     @State private var qaQuestion = ""
     @State private var qaAnswer = ""
     @State private var qaIsLoading = false
-    @State private var qaSourceFile: String?
     @State private var qaUsage: QAUsage?
+    @State private var qaStatusLine: String = ""
+    @State private var qaTraceExpanded: Bool = false
+    @StateObject private var qaTranscript: QATranscript = QATranscript()
+    @State private var currentQATask: Task<Void, Never>? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -459,15 +462,64 @@ struct MeetingRootView: View {
 
     private var appQABar: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // Status line + trace toggle + Stop button
+            if qaIsLoading || !qaTranscript.events.isEmpty {
+                Divider()
+                HStack(spacing: 6) {
+                    if qaIsLoading {
+                        ProgressView().scaleEffect(0.5)
+                    }
+                    Text(qaStatusLine.isEmpty ? "" : qaStatusLine)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    if !qaTranscript.events.isEmpty {
+                        Button(action: { qaTraceExpanded.toggle() }) {
+                            Label(qaTraceExpanded ? "Hide trace" : "Show trace", systemImage: qaTraceExpanded ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 11))
+                                .labelStyle(.titleAndIcon)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                    if qaIsLoading {
+                        Button("Stop") {
+                            currentQATask?.cancel()
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 11))
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6)
+            }
+
+            // Expandable trace
+            if qaTraceExpanded {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 2) {
+                        ForEach(Array(qaTranscript.events.enumerated()), id: \.offset) { _, event in
+                            Text(formatTraceLine(event))
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    .padding(8)
+                }
+                .frame(maxHeight: 180)
+                .background(Color.secondary.opacity(0.06))
+                .padding(.horizontal, 16)
+                .padding(.bottom, 6)
+            }
+
+            // Streaming answer
             if !qaAnswer.isEmpty {
                 Divider()
                 ScrollView {
                     VStack(alignment: .leading, spacing: 4) {
-                        if let source = qaSourceFile {
-                            Text(source)
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundColor(.orange)
-                        }
                         Text(qaAnswer)
                             .font(.system(size: 13))
                             .textSelection(.enabled)
@@ -482,10 +534,11 @@ struct MeetingRootView: View {
                     .padding(.horizontal, 16)
                     .padding(.vertical, 10)
                 }
-                .frame(maxHeight: 200)
+                .frame(maxHeight: 240)
                 .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
             }
 
+            // Input row (mostly unchanged)
             Divider()
             HStack(spacing: 8) {
                 Image(systemName: "sparkle.magnifyingglass")
@@ -506,8 +559,15 @@ struct MeetingRootView: View {
                     }
                     .buttonStyle(.plain)
                 }
-                if !qaAnswer.isEmpty {
-                    Button(action: { qaAnswer = ""; qaQuestion = ""; qaSourceFile = nil; qaUsage = nil }) {
+                if !qaAnswer.isEmpty || !qaTranscript.events.isEmpty {
+                    Button(action: {
+                        qaAnswer = ""
+                        qaQuestion = ""
+                        qaUsage = nil
+                        qaStatusLine = ""
+                        qaTranscript.clear()
+                        qaTraceExpanded = false
+                    }) {
                         Image(systemName: "xmark.circle")
                             .font(.system(size: 12))
                             .foregroundColor(.secondary)
@@ -541,77 +601,84 @@ struct MeetingRootView: View {
         return "\(u.modelDisplayName) · \(inputPart) / \(fmtOut) out · ~\(cost)"
     }
 
+    private func formatTraceLine(_ event: QAEvent) -> String {
+        switch event {
+        case .status(let s):
+            return "[status]    \(s)"
+        case .toolCall(_, let name, let summary, _):
+            return "[\(name)]    \(summary)"
+        case .toolResult(_, let summary, _, let isError):
+            return isError ? "[result]    ERROR: \(summary)" : "[result]    \(summary)"
+        case .text:
+            return "[text]      (streaming...)"
+        case .usage(let u):
+            let cost = String(format: "$%.4f", u.estimatedCostUSD)
+            return "[usage]     \(u.modelDisplayName) · \(u.inputTokens) in / \(u.outputTokens) out · \(cost)"
+        case .error(let msg):
+            return "[error]     \(msg)"
+        }
+    }
+
+    private func formatToolStatusLine(name: String, summary: String) -> String {
+        switch name {
+        case "grep": return "Searching: \(summary)"
+        case "read_file": return "Reading \(summary)"
+        case "list_dir": return "Listing \(summary)"
+        default: return "\(name): \(summary)"
+        }
+    }
+
     private func askAcrossMeetings() {
         let question = qaQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !question.isEmpty, !qaIsLoading else { return }
         qaIsLoading = true
         qaAnswer = ""
         qaUsage = nil
+        qaStatusLine = ""
+        qaTranscript.clear()
+        qaTraceExpanded = false
 
-        Task {
-            let keywords = question.lowercased()
-                .components(separatedBy: .whitespacesAndNewlines)
-                .filter { $0.count > 2 }
+        guard let stream = state.onAskQuestion?(question) else {
+            qaAnswer = "Could not answer — open Settings → Meeting Transcript → Cross-Meeting Q&A to configure."
+            qaIsLoading = false
+            return
+        }
 
-            var scored: [(name: String, content: String, score: Int)] = []
-
-            for group in state.historyGroups {
-                for entry in group.entries {
-                    guard let content = try? String(contentsOf: entry.fileURL, encoding: .utf8) else { continue }
-                    let lower = content.lowercased()
-                    let matchCount = keywords.filter { lower.contains($0) }.count
-                    if matchCount > 0 {
-                        scored.append((name: "\(group.date)/\(entry.name)", content: content, score: matchCount))
-                    }
-                }
-            }
-
-            scored.sort { $0.score > $1.score }
-
-            if scored.isEmpty {
-                qaAnswer = "No meetings found matching your question. Try different keywords."
-                qaIsLoading = false
-                return
-            }
-
-            let maxContext = 30000
-            var context = ""
-            var sourceFiles: [String] = []
-
-            for match in scored.prefix(5) {
-                let remaining = maxContext - context.count
-                guard remaining > 500 else { break }
-                let chunk = String(match.content.prefix(remaining))
-                context += "--- Meeting: \(match.name) ---\n\(chunk)\n\n"
-                sourceFiles.append(match.name)
-            }
-
-            qaSourceFile = "Searched: \(sourceFiles.joined(separator: ", "))"
-
-            guard let stream = state.onAskQuestion?(question, context) else {
-                qaAnswer = "Could not answer — open Settings → Meeting Transcript → Cross-Meeting Q&A to configure."
-                qaIsLoading = false
-                return
-            }
-
+        currentQATask = Task { @MainActor in
             do {
                 for try await event in stream {
+                    if Task.isCancelled { break }
                     switch event {
+                    case .status(let s):
+                        qaStatusLine = s
+                        qaTranscript.append(event)
+                    case .toolCall(_, let name, let summary, _):
+                        qaStatusLine = formatToolStatusLine(name: name, summary: summary)
+                        qaTranscript.append(event)
+                    case .toolResult:
+                        qaTranscript.append(event)
                     case .text(let delta):
+                        qaStatusLine = "Thinking..."
                         qaAnswer += delta
-                    case .usage(let usage):
-                        qaUsage = usage
+                        qaTranscript.append(event)
+                    case .usage(let u):
+                        qaUsage = u
+                        qaTranscript.append(event)
+                    case .error(let msg):
+                        qaAnswer = qaAnswer.isEmpty ? "Error: \(msg)" : qaAnswer + "\n\n[error: \(msg)]"
+                        qaTranscript.append(event)
                     }
                 }
                 qaAnswer = qaAnswer.trimmingCharacters(in: .whitespacesAndNewlines)
-            } catch {
-                if qaAnswer.isEmpty {
-                    qaAnswer = "Stream error: \(error.localizedDescription)"
-                } else {
-                    qaAnswer += "\n\n[stream interrupted: \(error.localizedDescription)]"
+                if qaAnswer.isEmpty && qaTranscript.events.isEmpty == false {
+                    qaAnswer = "No answer returned. Check the trace for what was searched."
                 }
+            } catch {
+                qaAnswer = qaAnswer.isEmpty ? "Stream error: \(error.localizedDescription)" : qaAnswer + "\n\n[stream interrupted: \(error.localizedDescription)]"
             }
+            qaStatusLine = ""
             qaIsLoading = false
+            currentQATask = nil
         }
     }
 
@@ -755,6 +822,15 @@ struct MeetingRootView: View {
                 Text("Granola up to date")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
+                Button {
+                    showGranolaImport = true
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Sync now")
             } else {
                 Text("Checking Granola…")
                     .font(.system(size: 11))
