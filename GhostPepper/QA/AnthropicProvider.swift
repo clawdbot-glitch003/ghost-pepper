@@ -125,3 +125,111 @@ struct AnthropicSSEAccumulator {
         }
     }
 }
+
+struct AnthropicProvider: LLMProvider {
+    static let keychainKey = "claudeAPIKey"
+
+    let model: ClaudeAPIModel
+    let apiKey: String
+
+    private static let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
+
+    func complete(
+        system: String,
+        messages: [LLMMessage],
+        tools: [LLMTool]
+    ) -> AsyncThrowingStream<ProviderEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let body = Self.buildRequestBody(model: model, system: system, messages: messages, tools: tools)
+                    var request = URLRequest(url: Self.endpoint)
+                    request.httpMethod = "POST"
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+                    request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+                    request.timeoutInterval = 600
+                    request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+                    let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                    guard let http = response as? HTTPURLResponse else {
+                        throw AnthropicProviderError.invalidResponse
+                    }
+                    if http.statusCode != 200 {
+                        var data = Data()
+                        for try await byte in bytes { data.append(byte) }
+                        let detail = String(data: data, encoding: .utf8) ?? "<no body>"
+                        throw AnthropicProviderError.httpError(status: http.statusCode, message: detail)
+                    }
+
+                    var accumulator = AnthropicSSEAccumulator { event in
+                        continuation.yield(event)
+                    }
+
+                    for try await line in bytes.lines {
+                        if Task.isCancelled { break }
+                        guard line.hasPrefix("data:") else { continue }
+                        let payload = line.dropFirst("data:".count).trimmingCharacters(in: .whitespaces)
+                        guard !payload.isEmpty, payload != "[DONE]" else { continue }
+                        try accumulator.handle(eventJSON: payload)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    static func buildRequestBody(
+        model: ClaudeAPIModel,
+        system: String,
+        messages: [LLMMessage],
+        tools: [LLMTool]
+    ) -> [String: Any] {
+        var body: [String: Any] = [
+            "model": model.rawValue,
+            "max_tokens": 4096,
+            "stream": true,
+            "system": [
+                [
+                    "type": "text",
+                    "text": system,
+                    "cache_control": ["type": "ephemeral"],
+                ],
+            ],
+            "messages": messages.map(encodeMessage(_:)),
+        ]
+        if !tools.isEmpty {
+            body["tools"] = tools.map { tool -> [String: Any] in
+                [
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.inputSchema,
+                ]
+            }
+        }
+        return body
+    }
+
+    private static func encodeMessage(_ message: LLMMessage) -> [String: Any] {
+        let role: String = (message.role == .user) ? "user" : "assistant"
+        let blocks: [[String: Any]] = message.content.map { block in
+            switch block {
+            case .text(let s):
+                return ["type": "text", "text": s]
+            case .toolUse(let id, let name, let input):
+                return ["type": "tool_use", "id": id, "name": name, "input": input]
+            case .toolResult(let toolUseId, let content, let isError):
+                return [
+                    "type": "tool_result",
+                    "tool_use_id": toolUseId,
+                    "content": content,
+                    "is_error": isError,
+                ]
+            }
+        }
+        return ["role": role, "content": blocks]
+    }
+}
