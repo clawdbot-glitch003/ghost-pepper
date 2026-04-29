@@ -58,6 +58,11 @@ enum IndexEntryFile {
         var sourceMeetings: [String] = []
         var lastUpdated: Date?
 
+        var generationModel: String?
+        var generationPromptKind: String?
+        var generationPromptHash: String?
+        var generationAt: Date?
+
         let lines = frontmatter.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         var i = 0
         while i < lines.count {
@@ -70,6 +75,14 @@ enum IndexEntryFile {
                 canonicalName = value
             } else if let value = scalarValue(line: line, key: "last_updated") {
                 lastUpdated = isoDate(from: value)
+            } else if let value = scalarValue(line: line, key: "generated_by_model") {
+                generationModel = value
+            } else if let value = scalarValue(line: line, key: "generated_by_prompt") {
+                generationPromptKind = value
+            } else if let value = scalarValue(line: line, key: "generated_by_hash") {
+                generationPromptHash = value
+            } else if let value = scalarValue(line: line, key: "generated_at") {
+                generationAt = isoDate(from: value)
             } else if line == "aliases:" || line == "aliases: []" {
                 if line == "aliases: []" { i += 1; continue }
                 let (collected, consumed) = collectListItems(lines, startingAfter: i)
@@ -91,13 +104,29 @@ enum IndexEntryFile {
             throw ParseError.malformedFrontmatter("canonical_name missing")
         }
 
+        let generation: GenerationMetadata?
+        if let model = generationModel,
+           let promptKind = generationPromptKind,
+           let promptHash = generationPromptHash,
+           let at = generationAt {
+            generation = GenerationMetadata(
+                model: model,
+                promptKind: promptKind,
+                promptHash: promptHash,
+                generatedAt: at
+            )
+        } else {
+            generation = nil
+        }
+
         return IndexEntry(
             kind: kind,
             canonicalName: canonicalName,
             aliases: aliases,
             sourceMeetings: sourceMeetings,
             lastUpdated: lastUpdated ?? Date(),
-            body: body.trimmingCharacters(in: .whitespacesAndNewlines)
+            body: body.trimmingCharacters(in: .whitespacesAndNewlines),
+            generation: generation
         )
     }
 
@@ -122,6 +151,12 @@ enum IndexEntryFile {
             }
         }
         out += "last_updated: \(isoString(from: entry.lastUpdated))\n"
+        if let gen = entry.generation {
+            out += "generated_by_model: \(yamlScalar(gen.model))\n"
+            out += "generated_by_prompt: \(yamlScalar(gen.promptKind))\n"
+            out += "generated_by_hash: \(yamlScalar(gen.promptHash))\n"
+            out += "generated_at: \(isoString(from: gen.generatedAt))\n"
+        }
         out += "---\n\n"
         out += entry.body
         if !entry.body.hasSuffix("\n") { out += "\n" }

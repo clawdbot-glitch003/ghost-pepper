@@ -29,7 +29,10 @@ enum IndexSystemPrompt {
 
         ## Entry file format
 
-        Use exactly this YAML frontmatter, then the dossier body:
+        Use exactly this YAML frontmatter, then the dossier body. The body
+        should be substantive — readers should come away knowing who this
+        person is, what they do, what they've discussed with the user across
+        meetings, and what's still open. Use the section structure below.
 
         ```
         ---
@@ -43,11 +46,36 @@ enum IndexSystemPrompt {
           - 2026-04-28/standup.md
           - 2026-04-26/q2-planning.md
         last_updated: 2026-04-28T15:30:00Z
+        role: "VP Platform"
+        affiliations: ["Acme Co."]
         ---
 
-        John leads the platform team. Often pairs with [[Lara Chen]] on
-        infrastructure decisions. In the Q2 planning meeting, he raised
-        concerns about the on-call rotation.
+        ## Overview
+
+        One paragraph: who they are, role, why they matter to the user.
+        Include current ventures, prior background, and notable affiliations.
+
+        ## Relationship & Context
+
+        How they connect to the user. How they were introduced, what
+        recurring topics or projects they collaborate on, who they share
+        connections with ([[wikilinked]] when relevant).
+
+        ## Key Interactions
+
+        Bulleted highlights from across all source meetings. Each bullet
+        should be a concrete fact, idea, or quote — not a generic summary.
+        Include specifics like fund sizes, dates, names, decisions, asks.
+
+        ## Themes & Interests
+
+        Recurring topics this person cares about, areas of expertise, or
+        opinions they've shared.
+
+        ## Open Threads
+
+        Anything pending: an intro to make, a follow-up the user owes, a
+        deal under discussion, a question unanswered.
 
         ## Mentions
 
@@ -58,6 +86,10 @@ enum IndexSystemPrompt {
         Wikilinks (`[[Lara Chen]]`) are how dossiers cross-reference each other —
         use them whenever you mention someone who has (or should have) their own
         dossier. The link target is the other person's canonical name.
+
+        Sections are flexible — drop "Open Threads" if there genuinely are
+        none, drop "Themes & Interests" for a one-meeting acquaintance —
+        but most multi-meeting people warrant the full structure.
 
         ## Slug rules
 
@@ -90,10 +122,13 @@ enum IndexSystemPrompt {
 
         - Skip common first names that don't refer to a specific person (e.g.,
           "John" if it's only ever used in passing without surname or context).
-        - Don't invent facts. If you only know someone attended one meeting,
-          say that.
-        - Keep dossiers concise — a few paragraphs at most. The body is for the
-          who/what/why, the source list is for the where.
+        - Don't invent facts. Cite source meetings inline (e.g.
+          `[2026-04-26/q2-planning.md]`) for non-obvious claims so a reader
+          can verify. If you only know someone attended one meeting, say that.
+        - Be substantive but tight — every bullet should carry information
+          a future reader can act on. No filler, no generic platitudes.
+        - For multi-meeting people, aim for ~150–400 words of body content.
+          For one-meeting acquaintances, much less is fine.
 
         Stop when every person who appears in the archive has an entry, or when
         you hit your iteration cap.
@@ -161,12 +196,20 @@ enum IndexSystemPrompt {
            plus any names in the body.
         3. For each person:
            a. Match against the canonical map above.
-           b. If matched: `read_file` the existing dossier, fold in this
-              meeting's contributions (a new bullet under "## Mentions" + any
-              new aliases), update `last_updated`, append to `source_meetings`,
-              `write_file` back.
-           c. If new: `write_file` a fresh dossier with this meeting as the
-              only source.
+           b. If matched: `read_file` the existing dossier. Fold in this
+              meeting's contributions:
+              - Add a new bullet under "## Mentions" with concrete context.
+              - Add new aliases if you found any.
+              - Append to `source_meetings`; update `last_updated`.
+              - If the new meeting adds material that belongs in the body
+                (a new venture, role, theme, or open thread), update the
+                relevant body section. If the existing body is just a stub
+                and the new meeting is rich, **rewrite the body** using the
+                full section structure (Overview / Relationship / Key
+                Interactions / Themes / Open Threads).
+              - `write_file` back.
+           c. If new: `write_file` a fresh dossier with the full section
+              structure, this meeting as the only source.
         4. Stop. Do NOT re-process other meetings — only this one.
 
         ## Entry file format
@@ -179,16 +222,22 @@ enum IndexSystemPrompt {
         aliases: [...]
         source_meetings: [...]
         last_updated: <ISO 8601>
+        role: "..."
+        affiliations: [...]
         ---
 
-        <dossier body with [[wikilinks]]>
-
+        ## Overview
+        ## Relationship & Context
+        ## Key Interactions
+        ## Themes & Interests
+        ## Open Threads
         ## Mentions
         - In `<path>`: <one-line context>
         ```
 
-        Keep updates minimal. You're folding in one meeting, not rewriting
-        existing dossiers.
+        Default to minimal updates — fold in one bullet under Mentions and
+        move on. But don't preserve a one-line stub body when the new
+        meeting gives you enough material to write a real overview.
         """
     }
 }

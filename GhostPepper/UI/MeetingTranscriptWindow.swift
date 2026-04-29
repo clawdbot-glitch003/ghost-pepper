@@ -959,26 +959,27 @@ struct MeetingRootView: View {
         Task { @MainActor in
             defer { isApplyingDossier = false }
             do {
-                let mergedBody = try await builder.mergeDossierBody(
+                let result = try await builder.mergeDossierBody(
                     kind: pending.kind,
                     slug: pending.slug,
                     canonicalName: pending.canonicalName,
                     newContent: summary
                 )
-                guard !mergedBody.isEmpty else {
+                guard !result.body.isEmpty else {
                     qaAnswer += "\n\n[apply failed: merge produced empty body]"
                     return
                 }
                 var entry = try IndexEntryFile.read(from: url)
-                entry.body = mergedBody
+                entry.body = result.body
                 entry.lastUpdated = Date()
+                entry.generation = result.generation
 
                 // Fold any newly-cited meeting paths into source_meetings.
                 // The Q&A answer + the merged body are scanned for date-folder
                 // path patterns (e.g. "2026-04-28/standup.md"); any not
                 // already in the frontmatter get appended.
                 let cited = Self.extractMeetingPaths(from: summary)
-                    .union(Self.extractMeetingPaths(from: mergedBody))
+                    .union(Self.extractMeetingPaths(from: result.body))
                 let existing = Set(entry.sourceMeetings)
                 let added = cited.subtracting(existing)
                 if !added.isEmpty {
@@ -1992,6 +1993,8 @@ struct MeetingTabContentView: View {
     @State private var selectedContentTab: MeetingContentTab = .notes
     @State private var searchText = ""
     @State private var showSearch = false
+    @State private var currentMatchIndex: Int = 0
+    @State private var matchCount: Int = 0
     @State private var showSummaryPrompt = false
     @AppStorage("meetingSummaryPrompt") private var summaryPrompt: String = MeetingSummaryGenerator.finalSummaryPrompt
     @AppStorage("selectedCleanupModelKind") private var selectedModelKind: String = LocalCleanupModelKind.qwen35_0_8b_q4_k_m.rawValue
@@ -2192,7 +2195,23 @@ struct MeetingTabContentView: View {
             Image(systemName: "magnifyingglass").foregroundColor(.secondary).font(.caption)
             TextField("Search...", text: $searchText)
                 .textFieldStyle(.plain).font(.system(size: 13)).focused($searchFocused)
+                .onSubmit { advanceMatch(forward: true) }
             if !searchText.isEmpty {
+                Text(matchCount == 0 ? "no matches" : "\(currentMatchIndex + 1) / \(matchCount)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(.secondary)
+                Button(action: { advanceMatch(forward: false) }) {
+                    Image(systemName: "chevron.up").font(.caption)
+                }
+                .buttonStyle(.plain)
+                .disabled(matchCount == 0)
+                .keyboardShortcut("g", modifiers: [.command, .shift])
+                Button(action: { advanceMatch(forward: true) }) {
+                    Image(systemName: "chevron.down").font(.caption)
+                }
+                .buttonStyle(.plain)
+                .disabled(matchCount == 0)
+                .keyboardShortcut("g", modifiers: [.command])
                 Button(action: { searchText = "" }) {
                     Image(systemName: "xmark.circle.fill").foregroundColor(.secondary).font(.caption)
                 }.buttonStyle(.plain)
@@ -2204,6 +2223,15 @@ struct MeetingTabContentView: View {
         .padding(.horizontal, 52).padding(.vertical, 8)
         .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
         .onAppear { searchFocused = true }
+        .onChange(of: searchText) { _, _ in currentMatchIndex = 0 }
+        .onChange(of: selectedContentTab) { _, _ in currentMatchIndex = 0 }
+    }
+
+    private func advanceMatch(forward: Bool) {
+        guard matchCount > 0 else { return }
+        currentMatchIndex = forward
+            ? (currentMatchIndex + 1) % matchCount
+            : (currentMatchIndex - 1 + matchCount) % matchCount
     }
 
     // MARK: - No Audio Warning
@@ -2253,11 +2281,22 @@ struct MeetingTabContentView: View {
                     }
                     .padding(.bottom, 4)
                 }
-                Text(body)
-                    .font(Self.articleFont)
-                    .lineSpacing(6)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if !searchText.isEmpty {
+                    HighlightedTextView(
+                        text: body,
+                        query: searchText,
+                        currentMatchIndex: currentMatchIndex,
+                        font: NSFont(name: "Georgia", size: 16) ?? NSFont.systemFont(ofSize: 16),
+                        onMatchCountChange: { matchCount = $0 }
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    Text(body)
+                        .font(Self.articleFont)
+                        .lineSpacing(6)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         } else {
             Text("No article saved.")
@@ -2266,23 +2305,51 @@ struct MeetingTabContentView: View {
         }
     }
 
+    @ViewBuilder
     private var notesContent: some View {
-        ZStack(alignment: .topLeading) {
-            if tab.transcript.notes.isEmpty {
-                Text("Start typing your notes...")
-                    .font(Self.notesFont)
-                    .foregroundColor(Color(nsColor: .placeholderTextColor))
-                    .padding(.top, 1).padding(.leading, 6)
-                    .allowsHitTesting(false)
-            }
-            TextEditor(text: $tab.transcript.notes)
-                .font(Self.notesFont).lineSpacing(6)
-                .scrollContentBackground(.hidden)
-                .frame(maxHeight: .infinity)
-                .onChange(of: tab.transcript.notes) { _, _ in
-                    state.saveActiveTab()
+        if !searchText.isEmpty {
+            HighlightedTextView(
+                text: tab.transcript.notes,
+                query: searchText,
+                currentMatchIndex: currentMatchIndex,
+                font: NSFont(name: "Georgia", size: 15) ?? NSFont.systemFont(ofSize: 15),
+                onMatchCountChange: { matchCount = $0 }
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ZStack(alignment: .topLeading) {
+                if tab.transcript.notes.isEmpty {
+                    Text("Start typing your notes...")
+                        .font(Self.notesFont)
+                        .foregroundColor(Color(nsColor: .placeholderTextColor))
+                        .padding(.top, 1).padding(.leading, 6)
+                        .allowsHitTesting(false)
                 }
+                TextEditor(text: $tab.transcript.notes)
+                    .font(Self.notesFont).lineSpacing(6)
+                    .scrollContentBackground(.hidden)
+                    .frame(maxHeight: .infinity)
+                    .onChange(of: tab.transcript.notes) { _, _ in
+                        state.saveActiveTab()
+                    }
+            }
         }
+    }
+
+    private func highlightedAttributed(_ source: String, query: String) -> AttributedString {
+        var attributed = AttributedString(source)
+        let q = query.lowercased()
+        guard !q.isEmpty else { return attributed }
+        let lower = source.lowercased()
+        var searchRange = lower.startIndex..<lower.endIndex
+        while let range = lower.range(of: q, range: searchRange) {
+            if let aRange = Range(range, in: attributed) {
+                attributed[aRange].backgroundColor = .orange.opacity(0.35)
+                attributed[aRange].foregroundColor = .primary
+            }
+            searchRange = range.upperBound..<lower.endIndex
+        }
+        return attributed
     }
 
     private var filteredSegments: [TranscriptSegment] {
@@ -2432,26 +2499,37 @@ struct MeetingTabContentView: View {
                 .cornerRadius(8)
             }
 
-            // Editable summary (same style as notes)
-            ZStack(alignment: .topLeading) {
-                if (tab.transcript.summary ?? "").isEmpty {
-                    Text("Summary will appear here after generation...")
-                        .font(Self.notesFont)
-                        .foregroundColor(Color(nsColor: .placeholderTextColor))
-                        .padding(.top, 1).padding(.leading, 6)
-                        .allowsHitTesting(false)
-                }
+            // Editable summary (same style as notes); read-only highlighted while searching.
+            if !searchText.isEmpty {
+                HighlightedTextView(
+                    text: tab.transcript.summary ?? "",
+                    query: searchText,
+                    currentMatchIndex: currentMatchIndex,
+                    font: NSFont(name: "Georgia", size: 15) ?? NSFont.systemFont(ofSize: 15),
+                    onMatchCountChange: { matchCount = $0 }
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ZStack(alignment: .topLeading) {
+                    if (tab.transcript.summary ?? "").isEmpty {
+                        Text("Summary will appear here after generation...")
+                            .font(Self.notesFont)
+                            .foregroundColor(Color(nsColor: .placeholderTextColor))
+                            .padding(.top, 1).padding(.leading, 6)
+                            .allowsHitTesting(false)
+                    }
 
-                TextEditor(text: Binding(
-                    get: { tab.transcript.summary ?? "" },
-                    set: { tab.transcript.summary = $0.isEmpty ? nil : $0 }
-                ))
-                .font(Self.notesFont)
-                .lineSpacing(6)
-                .scrollContentBackground(.hidden)
-                .frame(maxHeight: .infinity)
-                .onChange(of: tab.transcript.summary) { _, _ in
-                    state.saveActiveTab()
+                    TextEditor(text: Binding(
+                        get: { tab.transcript.summary ?? "" },
+                        set: { tab.transcript.summary = $0.isEmpty ? nil : $0 }
+                    ))
+                    .font(Self.notesFont)
+                    .lineSpacing(6)
+                    .scrollContentBackground(.hidden)
+                    .frame(maxHeight: .infinity)
+                    .onChange(of: tab.transcript.summary) { _, _ in
+                        state.saveActiveTab()
+                    }
                 }
             }
         }

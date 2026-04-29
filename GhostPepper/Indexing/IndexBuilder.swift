@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 /// Orchestrates building and incrementally updating an index of dossier
 /// markdown files. Wraps a `MeetingQAAgent` configured for the indexing task,
@@ -21,6 +22,27 @@ final class IndexBuilder {
         self.saveDir = saveDir
     }
 
+    /// 12-hex-char prefix of SHA-256(prompt). Used as the `generated_by_hash`
+    /// value so we can tell which prompt revision produced which entry.
+    nonisolated static func hashPrompt(_ prompt: String) -> String {
+        let digest = SHA256.hash(data: Data(prompt.utf8))
+        return digest.prefix(6).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Reads the just-written entry, stamps generation metadata onto it, and
+    /// writes back. Called after the agent's `write_file` succeeds.
+    fileprivate func augmentGeneration(slug: String, kind: IndexKind, promptKind: String, promptHash: String) {
+        let url = MarkdownArchivePaths.entryURL(in: saveDir, kind: kind, slug: slug)
+        guard var entry = try? IndexEntryFile.read(from: url) else { return }
+        entry.generation = GenerationMetadata(
+            model: model.rawValue,
+            promptKind: promptKind,
+            promptHash: promptHash,
+            generatedAt: Date()
+        )
+        try? IndexEntryFile.write(entry, to: url)
+    }
+
     // MARK: - Apply: merge new content into an existing dossier body
 
     /// Single-shot LLM merge. Reads the existing dossier body from disk,
@@ -28,12 +50,17 @@ final class IndexBuilder {
     /// merge instruction, and returns the merged body text. No tools used —
     /// pure generation, fast and cheap. Caller is responsible for writing
     /// the result back to disk.
+    struct MergeDossierResult {
+        let body: String
+        let generation: GenerationMetadata
+    }
+
     func mergeDossierBody(
         kind: IndexKind,
         slug: String,
         canonicalName: String,
         newContent: String
-    ) async throws -> String {
+    ) async throws -> MergeDossierResult {
         let url = MarkdownArchivePaths.entryURL(in: saveDir, kind: kind, slug: slug)
         let existingBody = (try? IndexEntryFile.read(from: url).body) ?? ""
 
@@ -73,7 +100,14 @@ final class IndexBuilder {
                 break
             }
         }
-        return merged.trimmingCharacters(in: .whitespacesAndNewlines)
+        let body = merged.trimmingCharacters(in: .whitespacesAndNewlines)
+        let generation = GenerationMetadata(
+            model: model.rawValue,
+            promptKind: "merge-dossier-body",
+            promptHash: Self.hashPrompt(system),
+            generatedAt: Date()
+        )
+        return MergeDossierResult(body: body, generation: generation)
     }
 
     // MARK: - Cost estimation
@@ -166,6 +200,7 @@ final class IndexBuilder {
             archiveRootPath: saveDir.path,
             indexRootPath: indexRoot.path
         )
+        let promptHash = Self.hashPrompt(prompt)
         let agent = makeAgent(systemPrompt: prompt, indexRoot: indexRoot)
         let initialMessage = Self.fullBuildInitialMessage(meetings: unprocessedMeetings)
 
@@ -186,6 +221,15 @@ final class IndexBuilder {
                     if !isError, summary.hasPrefix("Wrote") {
                         if let slug = Self.extractWrittenSlug(from: summary) {
                             entriesTouched.insert(slug)
+                            // Stamp provenance before downstream re-reads, so the
+                            // .source_meetings extraction sees the same file shape
+                            // we'd persist anyway.
+                            augmentGeneration(
+                                slug: slug,
+                                kind: kind,
+                                promptKind: "people-index-full-build",
+                                promptHash: promptHash
+                            )
                             continuation.yield(.entryWritten(slug: slug, canonicalName: ""))
                             // Re-read the just-written entry to pick up any new
                             // source_meetings, so the progress count advances
@@ -294,6 +338,7 @@ final class IndexBuilder {
             meetingPath: meetingPath,
             aliasSnapshot: aliasSnapshot
         )
+        let promptHash = Self.hashPrompt(prompt)
         let agent = makeAgent(systemPrompt: prompt, indexRoot: indexRoot)
         let initialMessage = "Update the People index for the new meeting at `\(meetingPath)`."
 
@@ -305,6 +350,12 @@ final class IndexBuilder {
                     if !isError, summary.hasPrefix("Wrote") {
                         if let slug = Self.extractWrittenSlug(from: summary) {
                             entriesTouched.insert(slug)
+                            augmentGeneration(
+                                slug: slug,
+                                kind: kind,
+                                promptKind: "people-index-incremental",
+                                promptHash: promptHash
+                            )
                         }
                     }
                 default:

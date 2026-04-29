@@ -55,16 +55,11 @@ struct IndexEntryView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack {
+            HStack(alignment: .firstTextBaseline) {
                 Text(entry.canonicalName)
                     .font(.system(size: 24, weight: .semibold))
                 Spacer()
-                Button(action: onRefresh) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 12))
-                }
-                .buttonStyle(.bordered)
-                .help("Re-run the agent for this entry")
+                refreshAffordance
             }
             HStack(spacing: 12) {
                 Label(entry.kind.displayName, systemImage: entry.kind.iconSystemName)
@@ -73,6 +68,46 @@ struct IndexEntryView: View {
             .font(.system(size: 11))
             .foregroundStyle(.secondary)
         }
+    }
+
+    /// If the entry carries generation metadata, the refresh button becomes
+    /// a small pill labeled "<Model> generated" — clicking it still triggers
+    /// the same Q&A-driven refresh, but the user can see at a glance which
+    /// model produced the current content. Hover/tooltip carries the full
+    /// audit trail (prompt kind, hash, timestamp). Falls back to a plain
+    /// refresh icon when there's no provenance yet.
+    @ViewBuilder
+    private var refreshAffordance: some View {
+        if let gen = entry.generation {
+            Button(action: onRefresh) {
+                HStack(spacing: 5) {
+                    Text(displayModel(gen.model))
+                        .font(.system(size: 11, weight: .medium))
+                    Text("generated")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.secondary.opacity(0.12)))
+            }
+            .buttonStyle(.plain)
+            .help("Generated \(formatted(gen.generatedAt))\nPrompt: \(gen.promptKind) · #\(gen.promptHash)\nClick to refresh with Q&A.")
+        } else {
+            Button(action: onRefresh) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 12))
+            }
+            .buttonStyle(.bordered)
+            .help("Refresh this entry by asking the agent")
+        }
+    }
+
+    private func displayModel(_ raw: String) -> String {
+        ClaudeAPIModel(rawValue: raw)?.shortDisplayName ?? raw
     }
 
     private var aliasesRow: some View {
@@ -213,6 +248,7 @@ struct IndexEntryView: View {
         f.timeStyle = .short
         return f.string(from: date)
     }
+
 }
 
 // MARK: - Markdown block parser
