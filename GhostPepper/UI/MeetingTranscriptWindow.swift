@@ -187,12 +187,14 @@ enum MeetingSurface: Equatable {
 enum NavTabContent {
     case indexEntry(kind: IndexKind, slug: String, entry: IndexEntry)
     case meeting(OpenMeetingTab)
+    case indexList(kind: IndexKind)
 
     @MainActor
     var title: String {
         switch self {
         case .indexEntry(_, _, let entry): return entry.canonicalName
         case .meeting(let tab): return tab.transcript.meetingName
+        case .indexList(let kind): return kind.displayName
         }
     }
 
@@ -200,6 +202,7 @@ enum NavTabContent {
         switch self {
         case .indexEntry(let kind, _, _): return kind.iconSystemName
         case .meeting: return "doc.text"
+        case .indexList(let kind): return kind.iconSystemName
         }
     }
 }
@@ -333,6 +336,20 @@ final class MeetingWindowState: ObservableObject {
         }
         guard let content = loadIndexEntryContent(kind: kind, slug: slug) else { return }
         let tab = OpenIndexTab(content: content)
+        indexTabs.append(tab)
+        selectedSurface = .indexTab(tab.id)
+    }
+
+    /// Opens the searchable list view of an index kind as its own tab.
+    func openIndexList(kind: IndexKind) {
+        if let existing = indexTabs.first(where: { tab in
+            if case let .indexList(k) = tab.content { return k == kind }
+            return false
+        }) {
+            selectedSurface = .indexTab(existing.id)
+            return
+        }
+        let tab = OpenIndexTab(content: .indexList(kind: kind))
         indexTabs.append(tab)
         selectedSurface = .indexTab(tab.id)
     }
@@ -643,6 +660,14 @@ struct MeetingRootView: View {
                 MissingAPIKeyView(onClose: { state.showBuildIndexSheet = false }, onOpenSettings: { state.onOpenSettings?() })
             }
         }
+        .sheet(isPresented: $showReaderCapture) {
+            ReaderCaptureSheet(
+                archiveRoot: state.saveDirectory
+            ) { savedURL in
+                state.openFile(savedURL)
+                state.loadHistory()
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .indexUpdated)) { _ in
             state.loadIndexes()
         }
@@ -949,11 +974,10 @@ struct MeetingRootView: View {
                         } label: {
                             Label("New ad hoc meeting", systemImage: "waveform")
                         }
-                        Divider()
                         Button {
-                            state.presentBuildIndexSheet(for: .people)
+                            showReaderCapture = true
                         } label: {
-                            Label("New People index", systemImage: "tray.full")
+                            Label("New reader…", systemImage: "newspaper")
                         }
                         if GranolaImporter.isCacheAvailable {
                             Divider()
@@ -987,26 +1011,51 @@ struct MeetingRootView: View {
 
     @StateObject private var granolaImporter = GranolaImporter()
     @State private var showGranolaImport = false
+    @State private var showReaderCapture = false
     @State private var todayEvents: [CalendarEvent] = []
     @State private var todayEventsLoaded = false
     @State private var todayEventsError: String?
     @State private var whitelistEmail: String = ""
     @State private var granolaPendingCount: Int? = nil
+    @State private var peopleIndexStatus: PeopleIndexStatus? = nil
+
+    enum PeopleIndexStatus: Equatable {
+        case notBuilt(meetingCount: Int)
+        case upToDate(entryCount: Int)
+        case pending(newCount: Int, entryCount: Int)
+    }
+
+    private var homeBrandHeader: some View {
+        HStack {
+            Image(nsImage: NSApp.applicationIconImage ?? NSImage(named: NSImage.applicationIconName) ?? NSImage())
+                .resizable()
+                .interpolation(.high)
+                .frame(width: 24, height: 24)
+                .accessibilityLabel("Ghost Pepper")
+            Spacer()
+        }
+        .padding(.horizontal, 24)
+    }
 
     private var newTabView: some View {
         VStack(spacing: 24) {
+            homeBrandHeader
+                .padding(.top, 16)
+
             if !GoogleCalendarService.shared.isSignedIn {
                 disconnectedQuickActions
-                    .padding(.top, 40)
             }
 
             if GranolaImporter.isCacheAvailable {
                 granolaSyncRow
-                    .padding(.top, GoogleCalendarService.shared.isSignedIn ? 40 : 0)
+                    .padding(.top, GoogleCalendarService.shared.isSignedIn ? 8 : 0)
             }
 
+            peopleIndexRow
+                .padding(.top, 4)
+
             todayCalendarSection
-                .padding(.top, (GoogleCalendarService.shared.isSignedIn && !GranolaImporter.isCacheAvailable) ? 40 : 0)
+                .padding(.top, (GoogleCalendarService.shared.isSignedIn && !GranolaImporter.isCacheAvailable) ? 8 : 0)
 
             Spacer(minLength: 0)
         }
@@ -1017,14 +1066,100 @@ struct MeetingRootView: View {
         .task {
             await loadTodayEvents()
             refreshGranolaPendingCount()
+            refreshPeopleIndexStatus()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await loadTodayEvents() }
             refreshGranolaPendingCount()
+            refreshPeopleIndexStatus()
         }
         .onReceive(NotificationCenter.default.publisher(for: .meetingRecordingStopped)) { _ in
             GoogleCalendarService.shared.invalidateTodayCache()
             Task { await loadTodayEvents() }
+            refreshPeopleIndexStatus()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .indexUpdated)) { _ in
+            refreshPeopleIndexStatus()
+        }
+    }
+
+    @ViewBuilder
+    private var peopleIndexRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: IndexKind.people.iconSystemName)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+            switch peopleIndexStatus {
+            case .pending(let newCount, _):
+                Button {
+                    state.presentBuildIndexSheet(for: .people)
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Sync \(newCount) new into People index")
+                            .font(.system(size: 12, weight: .medium))
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Color.orange))
+                    .foregroundColor(.white)
+                }
+                .buttonStyle(.plain)
+            case .upToDate:
+                Text("People index up to date")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                Button {
+                    state.presentBuildIndexSheet(for: .people)
+                } label: {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Re-sync People index")
+            case .notBuilt(let meetings) where meetings > 0:
+                Button {
+                    state.presentBuildIndexSheet(for: .people)
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Build People index from \(meetings) meetings")
+                            .font(.system(size: 12, weight: .medium))
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Color.orange))
+                    .foregroundColor(.white)
+                }
+                .buttonStyle(.plain)
+            case .notBuilt, .none:
+                EmptyView()
+            }
+            Spacer()
+        }
+        .frame(maxWidth: 560)
+        .padding(.horizontal, 24)
+    }
+
+    private func refreshPeopleIndexStatus() {
+        let saveDir = MeetingTranscriptSettings.effectiveSaveDirectory()
+        Task.detached(priority: .background) {
+            let allMeetings = IndexBuilder.allMeetingPaths(in: saveDir)
+            let entryCount = IndexBuilder.countExistingEntries(in: saveDir, kind: .people)
+            let covered = IndexBuilder.coveredMeetings(in: saveDir, kind: .people)
+            let unprocessed = allMeetings.filter { !covered.contains($0) }.count
+            let status: PeopleIndexStatus
+            if entryCount == 0 {
+                status = .notBuilt(meetingCount: allMeetings.count)
+            } else if unprocessed == 0 {
+                status = .upToDate(entryCount: entryCount)
+            } else {
+                status = .pending(newCount: unprocessed, entryCount: entryCount)
+            }
+            await MainActor.run { self.peopleIndexStatus = status }
         }
     }
 
@@ -1659,6 +1794,20 @@ struct NavTabContentView: View {
                 )
             case .meeting(let meetingTab):
                 MeetingTabContentView(tab: meetingTab, state: state)
+            case .indexList(let kind):
+                IndexListView(
+                    kind: kind,
+                    items: state.indexItems[kind] ?? [],
+                    onOpenEntry: { kind, slug in
+                        if let content = state.loadIndexEntryContent(kind: kind, slug: slug) {
+                            tab.navigate(to: content)
+                        }
+                    },
+                    onOpenEntryInNewTab: { kind, slug in
+                        state.openIndexEntry(kind: kind, slug: slug)
+                    },
+                    onBuild: { state.presentBuildIndexSheet(for: kind) }
+                )
             }
         }
     }
@@ -1865,10 +2014,17 @@ struct MeetingTabContentView: View {
 
     // MARK: - Content Tab Bar
 
+    private var availableContentTabs: [MeetingContentTab] {
+        if tab.transcript.articleBody != nil {
+            return [.article, .notes]
+        }
+        return [.notes, .transcript, .summary]
+    }
+
     private var contentTabBar: some View {
         VStack(spacing: 0) {
             HStack(spacing: 24) {
-                ForEach(MeetingContentTab.allCases, id: \.self) { ct in
+                ForEach(availableContentTabs, id: \.self) { ct in
                     Button(action: { selectedContentTab = ct }) {
                         Text(ct.label)
                             .font(.system(size: 13, weight: selectedContentTab == ct ? .semibold : .regular))
@@ -1885,6 +2041,11 @@ struct MeetingTabContentView: View {
                 Spacer()
             }
             Rectangle().fill(Color(nsColor: .separatorColor)).frame(height: 1)
+        }
+        .onAppear {
+            if !availableContentTabs.contains(selectedContentTab) {
+                selectedContentTab = availableContentTabs.first ?? .notes
+            }
         }
     }
 
@@ -1928,6 +2089,7 @@ struct MeetingTabContentView: View {
     @ViewBuilder
     private func contentForTab(proxy: ScrollViewProxy) -> some View {
         switch selectedContentTab {
+        case .article: articleContent
         case .notes: notesContent
         case .transcript: transcriptContent
         case .summary: summaryContent
@@ -1935,6 +2097,38 @@ struct MeetingTabContentView: View {
     }
 
     private static let notesFont = Font.custom("Georgia", size: 15)
+    private static let articleFont = Font.custom("Georgia", size: 16)
+
+    @ViewBuilder
+    private var articleContent: some View {
+        if let body = tab.transcript.articleBody {
+            VStack(alignment: .leading, spacing: 8) {
+                if let source = tab.transcript.sourceURL,
+                   let url = URL(string: source),
+                   let host = url.host {
+                    Link(destination: url) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "arrow.up.right.square")
+                                .font(.system(size: 10))
+                            Text(host)
+                                .font(.caption)
+                        }
+                        .foregroundColor(.orange)
+                    }
+                    .padding(.bottom, 4)
+                }
+                Text(body)
+                    .font(Self.articleFont)
+                    .lineSpacing(6)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        } else {
+            Text("No article saved.")
+                .font(.callout)
+                .foregroundColor(.secondary)
+        }
+    }
 
     private var notesContent: some View {
         ZStack(alignment: .topLeading) {
@@ -2161,9 +2355,10 @@ struct MeetingTabContentView: View {
 // MARK: - Content Tab Enum
 
 enum MeetingContentTab: String, CaseIterable {
-    case notes, transcript, summary
+    case article, notes, transcript, summary
     var label: String {
         switch self {
+        case .article: "📰 Article"
         case .notes: "📝 Notes"
         case .transcript: "📜 Transcript"
         case .summary: "✨ Summary"
@@ -2176,7 +2371,6 @@ enum MeetingContentTab: String, CaseIterable {
 struct MeetingSidebarView: View {
     @ObservedObject var state: MeetingWindowState
     @State private var searchText = ""
-    @State private var expandedIndexKinds: Set<IndexKind> = []
 
     private var filteredGroups: [(date: String, entries: [MeetingHistoryEntry])] {
         guard !searchText.isEmpty else { return state.historyGroups }
@@ -2312,79 +2506,35 @@ struct MeetingSidebarView: View {
     private var indexesSection: some View {
         ForEach(IndexKind.allCases) { kind in
             if let items = state.indexItems[kind], !items.isEmpty {
-                let filtered = searchText.isEmpty ? items : items.filter {
-                    $0.canonicalName.lowercased().contains(searchText.lowercased())
-                }
-                if !filtered.isEmpty {
-                    indexFolderHeader(kind: kind, count: filtered.count, autoExpanded: !searchText.isEmpty)
-
-                    if expandedIndexKinds.contains(kind) || !searchText.isEmpty {
-                        ForEach(filtered) { item in
-                            indexEntryRow(item: item)
-                        }
-                    }
-                }
+                indexFolderRow(kind: kind, count: items.count)
             }
         }
     }
 
-    private func indexFolderHeader(kind: IndexKind, count: Int, autoExpanded: Bool) -> some View {
-        let isExpanded = autoExpanded || expandedIndexKinds.contains(kind)
-        return Button(action: {
-            // Don't allow collapse while a search is active — that would hide matches.
-            guard !autoExpanded else { return }
-            if expandedIndexKinds.contains(kind) {
-                expandedIndexKinds.remove(kind)
-            } else {
-                expandedIndexKinds.insert(kind)
-            }
-        }) {
-            HStack(spacing: 4) {
-                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
-                    .font(.system(size: 9, weight: .semibold))
-                    .frame(width: 10)
+    private func indexFolderRow(kind: IndexKind, count: Int) -> some View {
+        let isOpen: Bool = state.indexTabs.contains { tab in
+            if case let .indexList(k) = tab.content { return k == kind }
+            return false
+        }
+        return Button(action: { state.openIndexList(kind: kind) }) {
+            HStack(spacing: 6) {
                 Image(systemName: kind.iconSystemName)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
+                    .foregroundColor(isOpen ? .orange : .secondary)
                 Text(kind.displayName)
                     .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(isOpen ? .orange : .primary)
                 Text("(\(count))")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 Spacer()
             }
-            .foregroundStyle(.primary)
             .padding(.horizontal, 12)
-            .padding(.vertical, 5)
+            .padding(.vertical, 6)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .padding(.top, 4)
-    }
-
-    private func indexEntryRow(item: IndexHistoryItem) -> some View {
-        let isOpen: Bool = state.indexTabs.contains { tab in
-            if case let .indexEntry(k, s, _) = tab.content {
-                return k == item.kind && s == item.slug
-            }
-            return false
-        }
-        return Button(action: { state.openIndexEntry(kind: item.kind, slug: item.slug) }) {
-            HStack(spacing: 6) {
-                Image(systemName: "person.crop.circle")
-                    .font(.system(size: 10))
-                    .foregroundColor(isOpen ? .orange : .secondary)
-                Text(item.canonicalName)
-                    .font(.system(size: 12))
-                    .foregroundColor(isOpen ? .orange : .primary)
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.leading, 32)
-            .padding(.trailing, 16)
-            .padding(.vertical, 4)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
     }
 }
 
