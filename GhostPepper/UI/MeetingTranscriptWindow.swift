@@ -979,14 +979,6 @@ struct MeetingRootView: View {
                         } label: {
                             Label("New reader…", systemImage: "newspaper")
                         }
-                        if GranolaImporter.isCacheAvailable {
-                            Divider()
-                            Button {
-                                showGranolaImport = true
-                            } label: {
-                                Label("Import from Granola…", systemImage: "tray.and.arrow.down")
-                            }
-                        }
                     } label: {
                         Image(systemName: "plus")
                             .font(.system(size: 11, weight: .medium))
