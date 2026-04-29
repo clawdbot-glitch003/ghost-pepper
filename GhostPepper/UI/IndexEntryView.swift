@@ -41,7 +41,12 @@ struct IndexEntryView: View {
         .environment(\.openURL, OpenURLAction { url in
             if url.scheme == "wikilink" {
                 let slug = url.host ?? url.lastPathComponent
-                onOpenEntry(entry.kind, slug)
+                let cmdHeld = NSApp.currentEvent?.modifierFlags.contains(.command) ?? false
+                if cmdHeld {
+                    onOpenEntryInNewTab(entry.kind, slug)
+                } else {
+                    onOpenEntry(entry.kind, slug)
+                }
                 return .handled
             }
             return .systemAction
