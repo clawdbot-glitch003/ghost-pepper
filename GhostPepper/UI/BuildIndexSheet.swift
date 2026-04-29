@@ -73,18 +73,30 @@ struct BuildIndexSheet: View {
     private var readyView: some View {
         if let estimate {
             VStack(alignment: .leading, spacing: 12) {
-                Text("This will scan **\(estimate.meetingCount)** meetings (~\(formatTokens(estimate.inputTokens)) tokens of context).")
+                if estimate.isResume {
+                    Text("**Existing index detected** (\(estimate.existingEntryCount) entries). The agent will read each existing dossier before writing, so this run **appends and updates** rather than starting over.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .padding(8)
+                        .background(Color.orange.opacity(0.1))
+                        .cornerRadius(6)
+                }
+
+                Text("This will scan **\(estimate.meetingCount)** meetings using **\(estimate.modelDisplayName)**.")
                     .font(.system(size: 13))
-                Text("Estimated cost: ≈ \(formatCost(estimate.estimatedCostUSD))")
+
+                Text("Likely cost: \(formatCost(estimate.likelyLowUSD)) – \(formatCost(estimate.likelyHighUSD))")
                     .font(.system(size: 13, weight: .medium))
-                Text("Could be up to \(formatCost(estimate.upperBoundCostUSD)) for a large archive — the agent's iterations grow context as it works.")
+
+                Text("Estimate is order-of-magnitude; running cost is shown during the build, and you can hit Stop at any time. Switch to Haiku in Settings → Cross-Meeting Q&A → Model for ~3× cheaper.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+
                 HStack {
                     Spacer()
                     Button("Cancel", action: onClose)
                         .keyboardShortcut(.cancelAction)
-                    Button("Build") {
+                    Button(estimate.isResume ? "Resume" : "Build") {
                         runBuild()
                     }
                     .keyboardShortcut(.defaultAction)
@@ -212,12 +224,6 @@ struct BuildIndexSheet: View {
             }
         }
         buildTask = task
-    }
-
-    private func formatTokens(_ tokens: Int) -> String {
-        if tokens >= 1_000_000 { return String(format: "%.1fM", Double(tokens) / 1_000_000) }
-        if tokens >= 1_000 { return String(format: "%.0fK", Double(tokens) / 1_000) }
-        return "\(tokens)"
     }
 
     private func formatCost(_ cost: Double) -> String {

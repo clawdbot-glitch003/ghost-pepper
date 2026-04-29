@@ -14,9 +14,10 @@ enum IndexBuildEvent {
 
 struct IndexBuildEstimate {
     let meetingCount: Int
-    let inputTokens: Int
-    /// Conservative cost in USD assuming output is 30% of input.
-    let estimatedCostUSD: Double
-    /// Upper-bound multiplier label, e.g. "could be up to 3x for large archives".
-    var upperBoundCostUSD: Double { estimatedCostUSD * 3 }
+    let existingEntryCount: Int
+    let likelyLowUSD: Double
+    let likelyHighUSD: Double
+    let modelDisplayName: String
+
+    var isResume: Bool { existingEntryCount > 0 }
 }

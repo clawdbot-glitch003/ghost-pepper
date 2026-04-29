@@ -23,28 +23,32 @@ final class IndexBuilder {
 
     // MARK: - Cost estimation
 
-    /// Pre-flight estimate. Walks the archive, counts meetings + size, and
-    /// asks Anthropic's count_tokens endpoint for a one-shot input estimate.
-    /// The agent's iteration loop grows context, so callers should label this
-    /// as a lower bound.
+    /// Pre-flight estimate. Returns a per-model cost range based on meeting
+    /// count and a heuristic calibrated against observed runs. Also reports
+    /// whether the build will be a fresh build or a resume (existing entries
+    /// detected on disk → agent will read+append rather than recreate).
+    /// Synchronous-fast: no API call needed.
     func estimateBuildCost(kind: IndexKind) async throws -> IndexBuildEstimate {
         let meetings = Self.allMeetingPaths(in: saveDir)
-        let prompt = IndexSystemPrompt.buildPeopleIndexFullBuild(
-            archiveRootPath: saveDir.path,
-            indexRootPath: MarkdownArchivePaths.indexRoot(in: saveDir, kind: kind).path
-        )
-        let initialMessage = LLMMessage(role: .user, content: [.text(Self.fullBuildInitialMessage(meetings: meetings))])
-        let inputTokens = try await provider.countInputTokens(
-            system: prompt,
-            messages: [initialMessage],
-            tools: Self.indexingToolDefinitions()
-        )
-        let cost = ClaudePricing.estimateBuildCostUSD(model: model, inputTokens: inputTokens)
+        let existingEntries = Self.countExistingEntries(in: saveDir, kind: kind)
+        let range = ClaudePricing.estimateBuildCostRange(model: model, meetingCount: meetings.count)
         return IndexBuildEstimate(
             meetingCount: meetings.count,
-            inputTokens: inputTokens,
-            estimatedCostUSD: cost
+            existingEntryCount: existingEntries,
+            likelyLowUSD: range.low,
+            likelyHighUSD: range.high,
+            modelDisplayName: model.shortDisplayName
         )
+    }
+
+    /// Count the dossier .md files under the given index kind's directory.
+    /// Used to detect a resume scenario in the build sheet.
+    nonisolated static func countExistingEntries(in saveDir: URL, kind: IndexKind) -> Int {
+        let root = MarkdownArchivePaths.indexRoot(in: saveDir, kind: kind)
+        guard let files = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else {
+            return 0
+        }
+        return files.filter { $0.pathExtension == "md" && !$0.lastPathComponent.hasPrefix("_") }.count
     }
 
     // MARK: - Full build
