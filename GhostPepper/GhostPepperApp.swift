@@ -51,11 +51,17 @@ struct GhostPepperApp: App {
                 guard !hasInitialized else { return }
                 hasInitialized = true
                 if onboardingCompleted {
-                    Task { await appState.initialize() }
+                    Task {
+                        await appState.initialize()
+                        appState.showMeetingTranscriptWindow()
+                    }
                 } else {
                     onboardingController.show(appState: appState) {
                         onboardingCompleted = true
-                        Task { await appState.initialize() }
+                        Task {
+                            await appState.initialize()
+                            appState.showMeetingTranscriptWindow()
+                        }
                     }
                 }
             }

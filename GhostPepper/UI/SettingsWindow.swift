@@ -3,17 +3,25 @@ import AppKit
 import CoreAudio
 import ServiceManagement
 
+extension Notification.Name {
+    static let showSettingsSection = Notification.Name("showSettingsSection")
+    static let meetingRecordingStopped = Notification.Name("meetingRecordingStopped")
+}
+
 final class SettingsWindowController: NSObject, NSWindowDelegate {
     private var window: NSWindow?
 
-    func show(appState: AppState) {
+    func show(appState: AppState, section: SettingsSection? = nil) {
         if let window = window {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            if let section {
+                NotificationCenter.default.post(name: .showSettingsSection, object: section)
+            }
             return
         }
 
-        let view = SettingsView(appState: appState)
+        let view = SettingsView(appState: appState, initialSection: section ?? .general)
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 960, height: 720),
@@ -155,7 +163,7 @@ struct SettingsView: View {
     @State private var hasAccessibilityPermission = PermissionChecker.checkAccessibility()
     @State private var hasInputMonitoringPermission = PermissionChecker.checkInputMonitoring()
     @State private var permissionPollTimer: Timer?
-    @State private var selectedSection: SettingsSection = .general
+    @State private var selectedSection: SettingsSection
     @State private var transcriptionLabPreviewSound: NSSound?
     @State private var recognizedVoices: [RecognizedVoiceProfile] = []
     @State private var recognizedVoiceSpeakerProfilesByID: [UUID: [TranscriptionLabSpeakerProfile]] = [:]
@@ -163,8 +171,9 @@ struct SettingsView: View {
     @StateObject private var dictationTestController: SettingsDictationTestController
     @StateObject private var transcriptionLabController: TranscriptionLabController
 
-    init(appState: AppState) {
+    init(appState: AppState, initialSection: SettingsSection = .general) {
         self.appState = appState
+        _selectedSection = State(initialValue: initialSection)
         _dictationTestController = StateObject(
             wrappedValue: SettingsDictationTestController(transcriber: appState.transcriber)
         )
@@ -330,6 +339,11 @@ struct SettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             refreshScreenRecordingPermission()
             refreshRequiredPermissions()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showSettingsSection)) { note in
+            if let section = note.object as? SettingsSection {
+                selectedSection = section
+            }
         }
         .onChange(of: selectedSection) { _, newSection in
             if newSection == .transcriptionLab {
@@ -1799,6 +1813,53 @@ struct SettingsView: View {
     @State private var meetingDirectoryBookmark: URL? = {
         MeetingTranscriptSettings.loadSaveDirectory()
     }()
+    @State private var claudeAPIKeyInput: String = KeychainHelper.get(AnthropicProvider.keychainKey) ?? ""
+    @State private var claudeAPIKeySaved: Bool = (KeychainHelper.get(AnthropicProvider.keychainKey) ?? "").isEmpty == false
+
+    private var crossMeetingQACard: some View {
+        SettingsCard("Cross-Meeting Q&A") {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Ask questions across all meeting transcripts. The assistant searches your archive with grep / read_file / list_dir and cites sources.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Picker("Provider", selection: .constant(LLMProviderKind.anthropic)) {
+                    ForEach(LLMProviderKind.allCases) { provider in
+                        Text(provider.displayName).tag(provider)
+                    }
+                }
+
+                Picker("Model", selection: $appState.claudeAPIModel) {
+                    ForEach(ClaudeAPIModel.allCases) { model in
+                        Text(model.displayName).tag(model.rawValue)
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    SecureField("sk-ant-...", text: $claudeAPIKeyInput)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: claudeAPIKeyInput) { _, _ in
+                            claudeAPIKeySaved = false
+                        }
+                    Button(claudeAPIKeySaved ? "Saved" : "Save") {
+                        _ = KeychainHelper.set(claudeAPIKeyInput, for: AnthropicProvider.keychainKey)
+                        claudeAPIKeySaved = true
+                    }
+                    .disabled(claudeAPIKeyInput.isEmpty)
+                    Button("Clear") {
+                        KeychainHelper.delete(AnthropicProvider.keychainKey)
+                        claudeAPIKeyInput = ""
+                        claudeAPIKeySaved = false
+                    }
+                    .disabled(claudeAPIKeyInput.isEmpty && !claudeAPIKeySaved)
+                }
+
+                Text("API key is stored in your macOS Keychain. Get one at [console.anthropic.com](https://console.anthropic.com/settings/keys). Cost is shown after each answer; prompt caching keeps follow-up questions cheap.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
 
     private var meetingTranscriptSection: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -1950,6 +2011,8 @@ struct SettingsView: View {
                         }
                     }
                 }
+
+                crossMeetingQACard
 
                 if !PermissionChecker.hasScreenRecordingPermission() {
                     SettingsCard("Permissions") {
