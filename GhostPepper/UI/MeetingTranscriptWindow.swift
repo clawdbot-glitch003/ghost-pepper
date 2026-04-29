@@ -671,10 +671,13 @@ struct MeetingRootView: View {
             ConsentDialogView(state: state)
         }
         .sheet(isPresented: $state.showBuildIndexSheet) {
-            if let builder = state.onMakeIndexBuilder?(state.pendingBuildIndexKind) {
+            // Check at sheet-present time that an API key exists; the actual
+            // builder is fetched on demand inside the sheet so the model
+            // picker can swap mid-flight.
+            if state.onMakeIndexBuilder?(state.pendingBuildIndexKind) != nil {
                 BuildIndexSheet(
                     kind: state.pendingBuildIndexKind,
-                    builder: builder,
+                    fetchBuilder: { state.onMakeIndexBuilder?(state.pendingBuildIndexKind) },
                     onClose: {
                         state.showBuildIndexSheet = false
                         state.loadIndexes()

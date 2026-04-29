@@ -4,9 +4,10 @@ import SwiftUI
 /// progress while the agent builds it. Closes on completion or cancel.
 struct BuildIndexSheet: View {
     let kind: IndexKind
-    let builder: IndexBuilder
+    let fetchBuilder: () -> IndexBuilder?
     let onClose: () -> Void
 
+    @AppStorage("claudeAPIModel") private var storedModel: String = ClaudeAPIModel.sonnet.rawValue
     @State private var phase: Phase = .estimating
     @State private var estimate: IndexBuildEstimate?
     @State private var statusLine: String = ""
@@ -16,6 +17,10 @@ struct BuildIndexSheet: View {
     @State private var runningCost: Double = 0
     @State private var errorMessage: String?
     @State private var buildTask: Task<Void, Never>?
+
+    private var selectedModel: ClaudeAPIModel {
+        ClaudeAPIModel(rawValue: storedModel) ?? .sonnet
+    }
 
     enum Phase {
         case estimating
@@ -92,13 +97,23 @@ struct BuildIndexSheet: View {
                 }
 
                 if !estimate.nothingToDo {
-                    Text("**\(estimate.unprocessedCount)** meetings to process using **\(estimate.modelDisplayName)**.")
-                        .font(.system(size: 13))
+                    HStack(spacing: 8) {
+                        Text("**\(estimate.unprocessedCount)** meetings to process using")
+                            .font(.system(size: 13))
+                        Picker("", selection: $storedModel) {
+                            ForEach(ClaudeAPIModel.allCases) { model in
+                                Text(model.shortDisplayName).tag(model.rawValue)
+                            }
+                        }
+                        .labelsHidden()
+                        .frame(maxWidth: 160)
+                    }
 
-                    Text("Likely cost: \(formatCost(estimate.likelyLowUSD)) – \(formatCost(estimate.likelyHighUSD))")
+                    let range = ClaudePricing.estimateBuildCostRange(model: selectedModel, meetingCount: estimate.unprocessedCount)
+                    Text("Likely cost: \(formatCost(range.low)) – \(formatCost(range.high))")
                         .font(.system(size: 13, weight: .medium))
 
-                    Text("Estimate is order-of-magnitude; running cost is shown during the build, and you can hit Stop at any time. Switch to Haiku in Settings → Cross-Meeting Q&A → Model for ~3× cheaper.")
+                    Text("Estimate is order-of-magnitude; running cost is shown during the build, and you can hit Stop at any time.")
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                 }
@@ -220,6 +235,11 @@ struct BuildIndexSheet: View {
     // MARK: - Actions
 
     private func runEstimate() async {
+        guard let builder = fetchBuilder() else {
+            self.errorMessage = "Couldn't construct an index builder. Check your Claude API key in Settings."
+            self.phase = .failed
+            return
+        }
         do {
             let est = try await builder.estimateBuildCost(kind: kind)
             self.estimate = est
@@ -233,13 +253,21 @@ struct BuildIndexSheet: View {
     }
 
     private func runBuild() {
+        // Fetched at click time so the picker's current model selection is
+        // honored — AppState's builder cache invalidates when the model
+        // setting changes.
+        guard let activeBuilder = fetchBuilder() else {
+            errorMessage = "Couldn't construct an index builder. Check your Claude API key in Settings."
+            phase = .failed
+            return
+        }
         phase = .building
         statusLine = "Starting…"
         entriesWritten = 0
         runningCost = 0
         let task = Task { @MainActor in
             do {
-                for try await event in builder.buildFullIndex(kind: kind) {
+                for try await event in activeBuilder.buildFullIndex(kind: kind) {
                     if Task.isCancelled { break }
                     switch event {
                     case .estimating, .estimated:
