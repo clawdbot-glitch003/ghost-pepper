@@ -179,7 +179,22 @@ final class OpenMeetingTab: ObservableObject, Identifiable {
 enum MeetingSurface: Equatable {
     case home
     case tab(UUID)
-    case indexEntry(IndexKind, slug: String)
+    case indexTab(UUID)
+}
+
+/// One open dossier shown as a tab in the file tab bar.
+@MainActor
+final class OpenIndexTab: ObservableObject, Identifiable {
+    let id = UUID()
+    let kind: IndexKind
+    let slug: String
+    @Published var entry: IndexEntry
+
+    init(kind: IndexKind, slug: String, entry: IndexEntry) {
+        self.kind = kind
+        self.slug = slug
+        self.entry = entry
+    }
 }
 
 /// One entry shown in the sidebar's Indexes section.
@@ -213,7 +228,7 @@ final class MeetingWindowState: ObservableObject {
     var onMakeIndexBuilder: ((IndexKind) -> IndexBuilder?)?
 
     @Published var indexItems: [IndexKind: [IndexHistoryItem]] = [:]
-    @Published var activeIndexEntry: IndexEntry?
+    @Published var indexTabs: [OpenIndexTab] = []
     @Published var showBuildIndexSheet: Bool = false
     @Published var pendingBuildIndexKind: IndexKind = .people
 
@@ -275,13 +290,31 @@ final class MeetingWindowState: ObservableObject {
     }
 
     func openIndexEntry(kind: IndexKind, slug: String) {
+        if let existing = indexTabs.first(where: { $0.kind == kind && $0.slug == slug }) {
+            selectedSurface = .indexTab(existing.id)
+            return
+        }
         let url = MarkdownArchivePaths.entryURL(in: saveDirectory, kind: kind, slug: slug)
         do {
             let entry = try IndexEntryFile.read(from: url)
-            activeIndexEntry = entry
-            selectedSurface = .indexEntry(kind, slug: slug)
+            let tab = OpenIndexTab(kind: kind, slug: slug, entry: entry)
+            indexTabs.append(tab)
+            selectedSurface = .indexTab(tab.id)
         } catch {
             print("MeetingWindowState: failed to load index entry \(slug): \(error)")
+        }
+    }
+
+    func closeIndexTab(_ tabID: UUID) {
+        indexTabs.removeAll { $0.id == tabID }
+        if case .indexTab(let id) = selectedSurface, id == tabID {
+            if let last = indexTabs.last {
+                selectedSurface = .indexTab(last.id)
+            } else if let lastMeeting = tabs.last {
+                selectedSurface = .tab(lastMeeting.id)
+            } else {
+                selectedSurface = .home
+            }
         }
     }
 
@@ -502,18 +535,17 @@ struct MeetingRootView: View {
                     } else {
                         newTabView
                     }
-                case .indexEntry(let kind, let slug):
-                    if let entry = state.activeIndexEntry {
+                case .indexTab(let id):
+                    if let tab = state.indexTabs.first(where: { $0.id == id }) {
                         IndexEntryView(
-                            entry: entry,
+                            entry: tab.entry,
                             saveDir: state.saveDirectory,
                             onOpenEntry: { kind, slug in state.openIndexEntry(kind: kind, slug: slug) },
                             onOpenMeeting: { path in state.openMeetingByRelativePath(path) },
                             onRefresh: { /* TODO: per-entry refresh in v2 */ }
                         )
                     } else {
-                        Text("Index entry not loaded")
-                            .onAppear { state.openIndexEntry(kind: kind, slug: slug) }
+                        Text("Tab not found")
                     }
                 }
             }
@@ -827,6 +859,21 @@ struct MeetingRootView: View {
                         } onClose: {
                             state.closeTab(tab.id)
                         }
+                    }
+
+                    ForEach(state.indexTabs) { indexTab in
+                        IndexTabView(
+                            tab: indexTab,
+                            isActive: {
+                                if case .indexTab(let id) = state.selectedSurface { return id == indexTab.id }
+                                return false
+                            }(),
+                            onSelect: {
+                                state.saveActiveTab()
+                                state.selectedSurface = .indexTab(indexTab.id)
+                            },
+                            onClose: { state.closeIndexTab(indexTab.id) }
+                        )
                     }
 
                     Menu {
@@ -1435,6 +1482,43 @@ private struct FileTabView: View {
                 Circle().fill(.red).frame(width: 6, height: 6)
             }
             Text(tab.transcript.meetingName)
+                .font(.system(size: 12))
+                .foregroundColor(isActive ? .primary : .secondary)
+                .lineLimit(1)
+
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .opacity(isActive ? 1 : 0.5)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(isActive ? Color(nsColor: .textBackgroundColor) : Color.clear)
+        .overlay(alignment: .bottom) {
+            if isActive {
+                Rectangle().fill(Color.orange).frame(height: 2)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { onSelect() }
+    }
+}
+
+private struct IndexTabView: View {
+    @ObservedObject var tab: OpenIndexTab
+    let isActive: Bool
+    let onSelect: () -> Void
+    let onClose: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: tab.kind.iconSystemName)
+                .font(.system(size: 10))
+                .foregroundColor(isActive ? .orange : .secondary)
+            Text(tab.entry.canonicalName)
                 .font(.system(size: 12))
                 .foregroundColor(isActive ? .primary : .secondary)
                 .lineLimit(1)
@@ -2158,12 +2242,7 @@ struct MeetingSidebarView: View {
     }
 
     private func indexEntryRow(item: IndexHistoryItem) -> some View {
-        let isOpen: Bool = {
-            if case let .indexEntry(k, slug) = state.selectedSurface {
-                return k == item.kind && slug == item.slug
-            }
-            return false
-        }()
+        let isOpen: Bool = state.indexTabs.contains { $0.kind == item.kind && $0.slug == item.slug }
         return Button(action: { state.openIndexEntry(kind: item.kind, slug: item.slug) }) {
             HStack(spacing: 6) {
                 Image(systemName: "person.crop.circle")
