@@ -268,6 +268,11 @@ final class MeetingWindowState: ObservableObject {
     @Published var showBuildIndexSheet: Bool = false
     @Published var pendingBuildIndexKind: IndexKind = .people
 
+    /// Set by deep views (e.g. per-entry "↻" button) to ask MeetingRootView
+    /// to drop a prompt into the bottom Q&A bar and fire it. The root view
+    /// consumes this on `.onChange` and clears it back to nil.
+    @Published var pendingQAPrompt: String? = nil
+
     var activeTabID: UUID? {
         if case let .tab(id) = selectedSurface { return id }
         return nil
@@ -639,6 +644,12 @@ struct MeetingRootView: View {
         .onAppear { state.loadHistory() }
         .onChange(of: state.showSidebar) { _, visible in
             if visible { state.loadHistory() }
+        }
+        .onChange(of: state.pendingQAPrompt) { _, prompt in
+            guard let prompt, !prompt.isEmpty, !qaIsLoading else { return }
+            qaQuestion = prompt
+            state.pendingQAPrompt = nil
+            askAcrossMeetings()
         }
         .onReceive(Timer.publish(every: 10, on: .main, in: .common).autoconnect()) { _ in
             if state.showSidebar { state.loadHistory() }
@@ -1782,7 +1793,15 @@ struct NavTabContentView: View {
                     onOpenMeetingInNewTab: { path in
                         state.openMeetingInNewIndexTab(relativePath: path)
                     },
-                    onRefresh: { /* TODO: per-entry refresh */ }
+                    onRefresh: {
+                        let canonical: String
+                        if case let .indexEntry(_, _, e) = tab.content {
+                            canonical = e.canonicalName
+                        } else {
+                            return
+                        }
+                        state.pendingQAPrompt = "Look up what we know about \(canonical) and augment their People page."
+                    }
                 )
             case .meeting(let meetingTab):
                 MeetingTabContentView(tab: meetingTab, state: state)
