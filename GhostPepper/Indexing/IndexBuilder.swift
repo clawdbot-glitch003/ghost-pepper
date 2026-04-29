@@ -78,7 +78,9 @@ final class IndexBuilder {
         let agent = makeAgent(systemPrompt: prompt, indexRoot: indexRoot)
         let initialMessage = Self.fullBuildInitialMessage(meetings: meetings)
 
+        let manifestURL = MarkdownArchivePaths.manifestURL(in: saveDir, kind: kind)
         var entriesTouched: Set<String> = []
+        var buildFailed = false
         do {
             for try await event in agent.ask(initialMessage) {
                 switch event {
@@ -89,14 +91,19 @@ final class IndexBuilder {
                     break
                 case .toolCall(_, let name, let summary, _):
                     continuation.yield(.status("\(name): \(summary)"))
-                    if name == "write_file" {
-                        // summary is "Wrote N bytes to <path>" only after toolResult; toolCall summary is the input
-                    }
                 case .toolResult(_, let summary, _, let isError):
                     if !isError, summary.hasPrefix("Wrote") {
                         if let slug = Self.extractWrittenSlug(from: summary) {
                             entriesTouched.insert(slug)
                             continuation.yield(.entryWritten(slug: slug, canonicalName: ""))
+                            // Persist a partial manifest after each entry write so
+                            // hitting Stop preserves progress. Only fully completed
+                            // builds mark all meetings as processed.
+                            persistPartialManifest(
+                                manifestURL: manifestURL,
+                                kind: kind,
+                                entriesTouched: entriesTouched
+                            )
                         }
                     }
                 case .usage(let u):
@@ -106,13 +113,17 @@ final class IndexBuilder {
                 }
             }
         } catch {
+            buildFailed = true
             continuation.yield(.error(error.localizedDescription))
+        }
+
+        if buildFailed {
             continuation.finish()
             return
         }
 
-        // Write manifest reflecting all meetings as processed (full build).
-        var manifest = IndexManifest.empty(kind: kind)
+        // Build completed cleanly: mark every meeting as processed.
+        var manifest = IndexManifest.loadOrEmpty(at: manifestURL, kind: kind)
         let now = Date()
         manifest.builtAt = now
         for meeting in meetings {
@@ -123,7 +134,7 @@ final class IndexBuilder {
             )
         }
         do {
-            try manifest.save(to: MarkdownArchivePaths.manifestURL(in: saveDir, kind: kind))
+            try manifest.save(to: manifestURL)
         } catch {
             continuation.yield(.error("Index built but failed to save manifest: \(error.localizedDescription)"))
             continuation.finish()
@@ -132,6 +143,25 @@ final class IndexBuilder {
         continuation.yield(.completed)
         continuation.finish()
         NotificationCenter.default.post(name: .indexUpdated, object: kind)
+    }
+
+    /// Saves a partial manifest mid-build. Only entries are recorded; meetings
+    /// stay un-marked until the build finishes cleanly. This means a Stop at
+    /// any point preserves the entries on disk, and a subsequent run won't
+    /// mistakenly skip meetings the agent hadn't actually finished with.
+    private func persistPartialManifest(
+        manifestURL: URL,
+        kind: IndexKind,
+        entriesTouched: Set<String>
+    ) {
+        var manifest = IndexManifest.loadOrEmpty(at: manifestURL, kind: kind)
+        manifest.builtAt = Date()
+        // entriesTouched is implicit in the .md files on disk; we don't need
+        // to encode it separately. The point of this write is just to keep
+        // the manifest file present so downstream code can find an alias
+        // snapshot when resuming.
+        _ = entriesTouched
+        try? manifest.save(to: manifestURL)
     }
 
     // MARK: - Incremental update
@@ -229,7 +259,7 @@ final class IndexBuilder {
             toolDefinitions: Self.indexingToolDefinitions(),
             summarizeInput: Self.summarizeIndexInput,
             summarizeOutput: Self.summarizeIndexOutput,
-            maxIterations: 30
+            maxIterations: 200
         )
     }
 

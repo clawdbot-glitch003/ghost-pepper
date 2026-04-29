@@ -67,16 +67,23 @@ enum IndexSystemPrompt {
 
         ## Process
 
-        1. `list_dir` the archive root to enumerate date folders.
-        2. For each date folder, `list_dir` to find meetings. `grep` is your
+        1. `list_dir` the index directory first — there may be entries from a
+           previous run that was stopped. If `<slug>.md` already exists for a
+           person you're about to write, `read_file` it and append to it
+           rather than overwriting. Treat every existing entry as the source
+           of truth for that person's canonical name and existing aliases.
+        2. `list_dir` the archive root to enumerate date folders.
+        3. For each date folder, `list_dir` to find meetings. `grep` is your
            friend for finding capitalized name patterns and `**Attendees:**`
            lines.
-        3. Build a working canonical-name list as you go. When you encounter a
+        4. Build a working canonical-name list as you go. When you encounter a
            variant of a name you've already seen, fold it into the existing
            entry as an alias rather than creating a duplicate.
-        4. For each canonical person, gather mentions across meetings, then
-           `write_file` the dossier with frontmatter + body + wikilinks.
-        5. Cite source meetings under a "## Mentions" heading with brief
+        5. For each canonical person, gather mentions across meetings, then
+           `write_file` the dossier with frontmatter + body + wikilinks. If an
+           existing entry was read in step 1, preserve its existing body and
+           append new mentions; do not regenerate from scratch.
+        6. Cite source meetings under a "## Mentions" heading with brief
            context. Don't paraphrase entire transcripts — keep it dossier-tight.
 
         ## Quality bar
