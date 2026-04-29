@@ -153,6 +153,7 @@ class AppState: ObservableObject {
 
     private var cleanupStateObserver: AnyCancellable?
     private var modelStateObserver: AnyCancellable?
+    private var pushToTalkChordObserver: AnyCancellable?
     private let recordingOCRPrefetch: RecordingOCRPrefetch
     private let speakerIdentityResolver = SpeakerIdentityResolver()
     private var activePerformanceTrace: PerformanceTrace?
@@ -320,6 +321,13 @@ class AppState: ObservableObject {
                 self?.objectWillChange.send()
             }
         }
+
+        // Keep the meeting Q&A placeholder in sync with the current PTT chord.
+        pushToTalkChordObserver = self.$pushToTalkChord
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] chord in
+                self?.meetingTranscriptWindowController.windowState?.pushToTalkDisplay = chord.displayString
+            }
 
         cleanupSettingsDefaults.set(storedCleanupBackend.rawValue, forKey: Self.cleanupBackendDefaultsKey)
         cleanupSettingsDefaults.set(
@@ -1004,6 +1012,9 @@ class AppState: ObservableObject {
         controller.shouldFloatWhileRecording = { [weak self] in
             self?.meetingWindowFloatsWhileRecording ?? true
         }
+        controller.pushToTalkDisplayProvider = { [weak self] in
+            self?.pushToTalkChord.displayString ?? ""
+        }
         controller.onOpenSettings = { [weak self] in
             self?.showSettings()
         }
@@ -1048,6 +1059,9 @@ class AppState: ObservableObject {
                 }
                 continuation.onTermination = { _ in task.cancel() }
             }
+        }
+        controller.onMakeIndexBuilder = { [weak self] kind in
+            self?.makeIndexBuilder(for: kind)
         }
         return controller
     }()
@@ -1347,7 +1361,59 @@ class AppState: ObservableObject {
             activeMeetingSession = nil
         }
         debugLogStore.record(category: .model, message: "\(logPrefix): \(session.transcript.meetingName)")
-        NotificationCenter.default.post(name: .meetingRecordingStopped, object: nil)
+        let savedURL = session.fileURL
+        NotificationCenter.default.post(name: .meetingRecordingStopped, object: savedURL)
+        if let savedURL = savedURL {
+            triggerIndexUpdates(for: savedURL)
+        }
+    }
+
+    // MARK: - Index updates
+
+    private var peopleIndexBuilder: IndexBuilder?
+
+    /// Lazily constructs the per-kind index builder, returning nil if the
+    /// Claude API key isn't configured (incremental updates skip silently in
+    /// that case — the user will still get to build an index on demand once
+    /// they configure a key).
+    private func indexBuilder(for kind: IndexKind) -> IndexBuilder? {
+        switch kind {
+        case .people:
+            if let existing = peopleIndexBuilder { return existing }
+            guard let key = KeychainHelper.get(AnthropicProvider.keychainKey), !key.isEmpty else {
+                return nil
+            }
+            let model = ClaudeAPIModel(rawValue: self.claudeAPIModel) ?? .sonnet
+            let provider = AnthropicProvider(model: model, apiKey: key)
+            let saveDir = MeetingTranscriptSettings.effectiveSaveDirectory()
+            let builder = IndexBuilder(provider: provider, model: model, saveDir: saveDir)
+            peopleIndexBuilder = builder
+            return builder
+        }
+    }
+
+    /// Re-resolves the index builder when the API key or model changes.
+    func resetIndexBuilders() {
+        peopleIndexBuilder = nil
+    }
+
+    /// Public entry point used by the UI's "New Index" button.
+    func makeIndexBuilder(for kind: IndexKind) -> IndexBuilder? {
+        indexBuilder(for: kind)
+    }
+
+    private func triggerIndexUpdates(for meetingURL: URL) {
+        // Only run incremental updates if there's a People index already on disk.
+        // The builder itself also checks this, but skipping here avoids spinning
+        // up a provider for nothing.
+        let saveDir = MeetingTranscriptSettings.effectiveSaveDirectory()
+        let peopleRoot = MarkdownArchivePaths.indexRoot(in: saveDir, kind: .people)
+        guard FileManager.default.fileExists(atPath: peopleRoot.path) else { return }
+        guard let builder = indexBuilder(for: .people) else {
+            debugLogStore.record(category: .model, message: "Skipping People index update: no Claude API key configured")
+            return
+        }
+        builder.updateForMeeting(meetingURL, kind: .people)
     }
 
     private var shortcutBindings: [ChordAction: KeyChord] {

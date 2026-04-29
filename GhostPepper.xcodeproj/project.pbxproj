@@ -178,6 +178,8 @@
 		1DDE0E0002000000000000F6 /* IndexManifest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DDE0E0001000000000000F6 /* IndexManifest.swift */; };
 		1DDE0E0002000000000000F7 /* IndexSystemPrompt.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DDE0E0001000000000000F7 /* IndexSystemPrompt.swift */; };
 		1DDE0E0002000000000000F8 /* IndexBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DDE0E0001000000000000F8 /* IndexBuilder.swift */; };
+		1DDE0E0002000000000000B1 /* IndexEntryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DDE0E0001000000000000B1 /* IndexEntryView.swift */; };
+		1DDE0E0002000000000000B2 /* BuildIndexSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DDE0E0001000000000000B2 /* BuildIndexSheet.swift */; };
 		1DDE0E0002000000000000A1 /* MarkdownArchivePathsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DDE0E0001000000000000A1 /* MarkdownArchivePathsTests.swift */; };
 		1DDE0E0002000000000000A2 /* IndexEntryFileTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DDE0E0001000000000000A2 /* IndexEntryFileTests.swift */; };
 		1DDE0E0002000000000000A3 /* IndexManifestTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DDE0E0001000000000000A3 /* IndexManifestTests.swift */; };
@@ -369,6 +371,8 @@
 		1DDE0E0001000000000000F6 /* IndexManifest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IndexManifest.swift; sourceTree = "<group>"; };
 		1DDE0E0001000000000000F7 /* IndexSystemPrompt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IndexSystemPrompt.swift; sourceTree = "<group>"; };
 		1DDE0E0001000000000000F8 /* IndexBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IndexBuilder.swift; sourceTree = "<group>"; };
+		1DDE0E0001000000000000B1 /* IndexEntryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IndexEntryView.swift; sourceTree = "<group>"; };
+		1DDE0E0001000000000000B2 /* BuildIndexSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildIndexSheet.swift; sourceTree = "<group>"; };
 		1DDE0E0001000000000000A1 /* MarkdownArchivePathsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownArchivePathsTests.swift; sourceTree = "<group>"; };
 		1DDE0E0001000000000000A2 /* IndexEntryFileTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IndexEntryFileTests.swift; sourceTree = "<group>"; };
 		1DDE0E0001000000000000A3 /* IndexManifestTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IndexManifestTests.swift; sourceTree = "<group>"; };
@@ -600,9 +604,11 @@
 		50C964CA46111D1FD8AFE84B /* UI */ = {
 			isa = PBXGroup;
 			children = (
+				1DDE0E0001000000000000B2 /* BuildIndexSheet.swift */,
 				95281DF90A125CA223FCEE7A /* ContextBubbleView.swift */,
 				2715D9117D8664700616D95A /* DebugLogWindow.swift */,
 				B89E71C9D2C08957AB78FA5E /* GranolaImportView.swift */,
+				1DDE0E0001000000000000B1 /* IndexEntryView.swift */,
 				E1E1B6653DAE6ED42FE9910B /* MeetingTranscriptWindow.swift */,
 				AACCB8CD3CFA3BA1C91B5B87 /* MenuBarView.swift */,
 				3B68F46BA90BDD633868A8CE /* ModelInventoryViews.swift */,
@@ -1017,6 +1023,8 @@
 				1DDE0E0002000000000000F6 /* IndexManifest.swift in Sources */,
 				1DDE0E0002000000000000F7 /* IndexSystemPrompt.swift in Sources */,
 				1DDE0E0002000000000000F8 /* IndexBuilder.swift in Sources */,
+				1DDE0E0002000000000000B1 /* IndexEntryView.swift in Sources */,
+				1DDE0E0002000000000000B2 /* BuildIndexSheet.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -22,7 +22,9 @@ final class MeetingTranscriptWindowController: NSObject, NSWindowDelegate {
     var onStopRecording: ((MeetingSession) -> Void)?
     var onGenerateSummary: ((MeetingTranscript) -> Void)?
     var onAskQuestion: ((_ question: String) -> AsyncThrowingStream<QAEvent, Error>)?
+    var onMakeIndexBuilder: ((IndexKind) -> IndexBuilder?)?
     var shouldFloatWhileRecording: () -> Bool = { false }
+    var pushToTalkDisplayProvider: () -> String = { "" }
 
     private(set) var windowState: MeetingWindowState?
 
@@ -44,6 +46,8 @@ final class MeetingTranscriptWindowController: NSObject, NSWindowDelegate {
         state.onStopRecording = onStopRecording
         state.onGenerateSummary = onGenerateSummary
         state.onAskQuestion = onAskQuestion
+        state.onMakeIndexBuilder = onMakeIndexBuilder
+        state.pushToTalkDisplay = pushToTalkDisplayProvider()
         state.onRecordingStateChanged = { [weak self] in
             self?.updateWindowLevel()
         }
@@ -175,11 +179,22 @@ final class OpenMeetingTab: ObservableObject, Identifiable {
 enum MeetingSurface: Equatable {
     case home
     case tab(UUID)
+    case indexEntry(IndexKind, slug: String)
+}
+
+/// One entry shown in the sidebar's Indexes section.
+struct IndexHistoryItem: Identifiable, Hashable {
+    let kind: IndexKind
+    let slug: String
+    let canonicalName: String
+    let fileURL: URL
+    var id: String { "\(kind.rawValue)/\(slug)" }
 }
 
 @MainActor
 final class MeetingWindowState: ObservableObject {
     var onAskQuestion: ((_ question: String) -> AsyncThrowingStream<QAEvent, Error>)?
+    @Published var pushToTalkDisplay: String = ""
     @Published var tabs: [OpenMeetingTab] = []
     @Published var selectedSurface: MeetingSurface = .home
     @Published var showSidebar = true
@@ -195,11 +210,19 @@ final class MeetingWindowState: ObservableObject {
     var onStartRecording: ((_ name: String, _ detectedMeeting: DetectedMeeting?) -> MeetingSession?)?
     var onStopRecording: ((MeetingSession) -> Void)?
     var onGenerateSummary: ((MeetingTranscript) -> Void)?
+    var onMakeIndexBuilder: ((IndexKind) -> IndexBuilder?)?
+
+    @Published var indexItems: [IndexKind: [IndexHistoryItem]] = [:]
+    @Published var activeIndexEntry: IndexEntry?
+    @Published var showBuildIndexSheet: Bool = false
+    @Published var pendingBuildIndexKind: IndexKind = .people
 
     var activeTabID: UUID? {
         if case let .tab(id) = selectedSurface { return id }
         return nil
     }
+
+    var saveDirectory: URL { MeetingTranscriptSettings.effectiveSaveDirectory() }
 
     var activeTab: OpenMeetingTab? {
         guard let id = activeTabID else { return nil }
@@ -249,6 +272,49 @@ final class MeetingWindowState: ObservableObject {
         } catch {
             print("MeetingWindowState: failed to load \(url.lastPathComponent): \(error)")
         }
+    }
+
+    func openIndexEntry(kind: IndexKind, slug: String) {
+        let url = MarkdownArchivePaths.entryURL(in: saveDirectory, kind: kind, slug: slug)
+        do {
+            let entry = try IndexEntryFile.read(from: url)
+            activeIndexEntry = entry
+            selectedSurface = .indexEntry(kind, slug: slug)
+        } catch {
+            print("MeetingWindowState: failed to load index entry \(slug): \(error)")
+        }
+    }
+
+    func openMeetingByRelativePath(_ relativePath: String) {
+        let url = saveDirectory.appendingPathComponent(relativePath)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            print("MeetingWindowState: meeting file missing at \(relativePath)")
+            return
+        }
+        openFile(url)
+    }
+
+    func loadIndexes() {
+        var byKind: [IndexKind: [IndexHistoryItem]] = [:]
+        for kind in IndexKind.allCases {
+            let root = MarkdownArchivePaths.indexRoot(in: saveDirectory, kind: kind)
+            guard FileManager.default.fileExists(atPath: root.path) else { continue }
+            let urls = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
+            var items: [IndexHistoryItem] = []
+            for url in urls where url.pathExtension == "md" && !url.lastPathComponent.hasPrefix("_") {
+                let slug = String(url.lastPathComponent.dropLast(3))
+                let canonical = (try? IndexEntryFile.read(from: url).canonicalName) ?? slug
+                items.append(IndexHistoryItem(kind: kind, slug: slug, canonicalName: canonical, fileURL: url))
+            }
+            items.sort { $0.canonicalName.lowercased() < $1.canonicalName.lowercased() }
+            byKind[kind] = items
+        }
+        indexItems = byKind
+    }
+
+    func presentBuildIndexSheet(for kind: IndexKind) {
+        pendingBuildIndexKind = kind
+        showBuildIndexSheet = true
     }
 
     func closeTab(_ tabID: UUID) {
@@ -436,6 +502,19 @@ struct MeetingRootView: View {
                     } else {
                         newTabView
                     }
+                case .indexEntry(let kind, let slug):
+                    if let entry = state.activeIndexEntry {
+                        IndexEntryView(
+                            entry: entry,
+                            saveDir: state.saveDirectory,
+                            onOpenEntry: { kind, slug in state.openIndexEntry(kind: kind, slug: slug) },
+                            onOpenMeeting: { path in state.openMeetingByRelativePath(path) },
+                            onRefresh: { /* TODO: per-entry refresh in v2 */ }
+                        )
+                    } else {
+                        Text("Index entry not loaded")
+                            .onAppear { state.openIndexEntry(kind: kind, slug: slug) }
+                    }
                 }
             }
             .background(Color(nsColor: .textBackgroundColor))
@@ -456,6 +535,24 @@ struct MeetingRootView: View {
         .sheet(isPresented: $state.showConsentDialog) {
             ConsentDialogView(state: state)
         }
+        .sheet(isPresented: $state.showBuildIndexSheet) {
+            if let builder = state.onMakeIndexBuilder?(state.pendingBuildIndexKind) {
+                BuildIndexSheet(
+                    kind: state.pendingBuildIndexKind,
+                    builder: builder,
+                    onClose: {
+                        state.showBuildIndexSheet = false
+                        state.loadIndexes()
+                    }
+                )
+            } else {
+                MissingAPIKeyView(onClose: { state.showBuildIndexSheet = false }, onOpenSettings: { state.onOpenSettings?() })
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .indexUpdated)) { _ in
+            state.loadIndexes()
+        }
+        .onAppear { state.loadIndexes() }
     }
 
     // MARK: - App-Level Q&A
@@ -550,7 +647,7 @@ struct MeetingRootView: View {
                 Image(systemName: "cpu")
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
-                TextField("Run agent across meeting data...", text: $qaQuestion)
+                TextField(qaPlaceholder, text: $qaQuestion)
                     .textFieldStyle(.plain)
                     .font(.system(size: 13))
                     .onSubmit { askAcrossMeetings() }
@@ -610,6 +707,10 @@ struct MeetingRootView: View {
     private func runningCostText(_ u: QAUsage) -> String {
         if u.isLocal { return "free" }
         return String(format: "~$%.4f", u.estimatedCostUSD)
+    }
+
+    private var qaPlaceholder: String {
+        "Run agent across meeting data..."
     }
 
     private func formatTraceLine(_ event: QAEvent) -> String {
@@ -738,6 +839,12 @@ struct MeetingRootView: View {
                             state.startAdHocCall()
                         } label: {
                             Label("New ad hoc meeting", systemImage: "waveform")
+                        }
+                        Divider()
+                        Button {
+                            state.presentBuildIndexSheet(for: .people)
+                        } label: {
+                            Label("New People index", systemImage: "tray.full")
                         }
                         if GranolaImporter.isCacheAvailable {
                             Divider()
@@ -1923,6 +2030,8 @@ struct MeetingSidebarView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 2) {
+                    indexesSection
+
                     if filteredGroups.isEmpty {
                         Text(searchText.isEmpty ? "No past meetings" : "No matches")
                             .font(.caption).foregroundColor(.secondary)
@@ -1992,6 +2101,85 @@ struct MeetingSidebarView: View {
     private func openMeetingsFolder() {
         let dir = MeetingTranscriptSettings.effectiveSaveDirectory()
         NSWorkspace.shared.open(dir)
+    }
+
+    @ViewBuilder
+    private var indexesSection: some View {
+        ForEach(IndexKind.allCases) { kind in
+            if let items = state.indexItems[kind], !items.isEmpty {
+                let filtered = searchText.isEmpty ? items : items.filter {
+                    $0.canonicalName.lowercased().contains(searchText.lowercased())
+                }
+                if !filtered.isEmpty {
+                    HStack(spacing: 4) {
+                        Image(systemName: kind.iconSystemName)
+                            .font(.system(size: 9))
+                        Text(kind.displayName)
+                            .font(.system(size: 10, weight: .semibold))
+                            .textCase(.uppercase)
+                    }
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 10).padding(.bottom, 2)
+
+                    ForEach(filtered) { item in
+                        let isOpen: Bool = {
+                            if case let .indexEntry(k, slug) = state.selectedSurface { return k == item.kind && slug == item.slug }
+                            return false
+                        }()
+                        Button(action: { state.openIndexEntry(kind: item.kind, slug: item.slug) }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "person.crop.circle")
+                                    .font(.system(size: 10))
+                                    .foregroundColor(isOpen ? .orange : .secondary)
+                                Text(item.canonicalName)
+                                    .font(.system(size: 12))
+                                    .foregroundColor(isOpen ? .orange : .primary)
+                                    .lineLimit(1)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 5)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Missing API Key
+
+private struct MissingAPIKeyView: View {
+    let onClose: () -> Void
+    let onOpenSettings: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Image(systemName: "key")
+                    .font(.system(size: 16))
+                Text("Claude API key required")
+                    .font(.system(size: 16, weight: .semibold))
+            }
+            Text("Index building uses Claude (Anthropic API). Add your API key in Settings → Meeting Transcript → Cross-Meeting Q&A.")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("Cancel", action: onClose)
+                Button("Open Settings") {
+                    onOpenSettings()
+                    onClose()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.orange)
+            }
+        }
+        .padding(20)
+        .frame(width: 400)
     }
 }
 
