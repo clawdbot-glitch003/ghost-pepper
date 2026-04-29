@@ -2,17 +2,28 @@ import SwiftUI
 
 /// Cmd+K command palette. Live-filters across People (index entries),
 /// Meetings (recorded / imported markdown), and Notes (quick-note files).
-/// Click a result to open it in the current tab; Enter activates the first
-/// result; Esc dismisses.
+/// ↑/↓ moves the highlight; Enter opens the highlighted result; Esc dismisses.
 struct CommandKSearchSheet: View {
     @ObservedObject var state: MeetingWindowState
     @Binding var isPresented: Bool
 
     @State private var query: String = ""
+    @State private var selectedIndex: Int = 0
     @FocusState private var fieldFocused: Bool
 
     private var results: CommandKResults {
         CommandKResults.compute(state: state, query: query)
+    }
+
+    /// Flat list across all three sections in the order they're rendered, so
+    /// arrow-key navigation lines up with what the user sees.
+    private var flatItems: [CommandKItem] {
+        results.people + results.meetings + results.notes
+    }
+
+    private var clampedIndex: Int {
+        guard !flatItems.isEmpty else { return 0 }
+        return max(0, min(selectedIndex, flatItems.count - 1))
     }
 
     var body: some View {
@@ -23,6 +34,17 @@ struct CommandKSearchSheet: View {
         }
         .frame(width: 620)
         .onAppear { fieldFocused = true }
+        .onChange(of: query) { _, _ in selectedIndex = 0 }
+        .onKeyPress(.upArrow) {
+            guard !flatItems.isEmpty else { return .ignored }
+            selectedIndex = max(0, clampedIndex - 1)
+            return .handled
+        }
+        .onKeyPress(.downArrow) {
+            guard !flatItems.isEmpty else { return .ignored }
+            selectedIndex = min(flatItems.count - 1, clampedIndex + 1)
+            return .handled
+        }
     }
 
     private var searchField: some View {
@@ -34,7 +56,7 @@ struct CommandKSearchSheet: View {
                 .textFieldStyle(.plain)
                 .font(.system(size: 16))
                 .focused($fieldFocused)
-                .onSubmit { activateFirst() }
+                .onSubmit { activateSelected() }
             if !query.isEmpty {
                 Button(action: { query = "" }) {
                     Image(systemName: "xmark.circle.fill")
@@ -43,6 +65,8 @@ struct CommandKSearchSheet: View {
                 }
                 .buttonStyle(.plain)
             }
+            keyHint("↑↓")
+            keyHint("⏎")
             Button(action: { isPresented = false }) {
                 Text("ESC")
                     .font(.system(size: 10, weight: .medium, design: .monospaced))
@@ -57,6 +81,16 @@ struct CommandKSearchSheet: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
+    }
+
+    private func keyHint(_ glyph: String) -> some View {
+        Text(glyph)
+            .font(.system(size: 10, weight: .medium, design: .monospaced))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(Color.secondary.opacity(0.15))
+            .cornerRadius(3)
+            .foregroundStyle(.secondary)
     }
 
     @ViewBuilder
@@ -74,15 +108,23 @@ struct CommandKSearchSheet: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 36)
         } else {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    section(title: "People", icon: "person.3", items: results.people)
-                    section(title: "Meetings", icon: "doc.text", items: results.meetings)
-                    section(title: "Notes", icon: "note.text", items: results.notes)
+            ScrollViewReader { proxy in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        section(title: "People", icon: "person.3", items: results.people)
+                        section(title: "Meetings", icon: "doc.text", items: results.meetings)
+                        section(title: "Notes", icon: "note.text", items: results.notes)
+                    }
+                    .padding(.vertical, 6)
                 }
-                .padding(.vertical, 6)
+                .frame(maxHeight: 440)
+                .onChange(of: clampedIndex) { _, idx in
+                    guard idx < flatItems.count else { return }
+                    withAnimation(.easeOut(duration: 0.1)) {
+                        proxy.scrollTo(flatItems[idx].id, anchor: .center)
+                    }
+                }
             }
-            .frame(maxHeight: 440)
         }
     }
 
@@ -96,30 +138,47 @@ struct CommandKSearchSheet: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 10)
                 .padding(.bottom, 4)
-            ForEach(items) { item in
-                Button(action: { activate(item) }) {
-                    HStack(spacing: 10) {
-                        Image(systemName: icon)
-                            .font(.system(size: 12))
+            ForEach(Array(items.enumerated()), id: \.element.id) { _, item in
+                resultRow(item: item, icon: icon)
+                    .id(item.id)
+            }
+        }
+    }
+
+    private func resultRow(item: CommandKItem, icon: String) -> some View {
+        let isSelected = flatItems.indices.contains(clampedIndex) && flatItems[clampedIndex].id == item.id
+        return Button(action: { activate(item) }) {
+            HStack(spacing: 10) {
+                Image(systemName: icon)
+                    .font(.system(size: 12))
+                    .foregroundStyle(isSelected ? .primary : .secondary)
+                    .frame(width: 16)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.title)
+                        .font(.system(size: 13))
+                    if let subtitle = item.subtitle {
+                        Text(subtitle)
+                            .font(.system(size: 11))
                             .foregroundStyle(.secondary)
-                            .frame(width: 16)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(item.title)
-                                .font(.system(size: 13))
-                            if let subtitle = item.subtitle {
-                                Text(subtitle)
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
-                        Spacer()
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 6)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                Spacer()
+                if isSelected {
+                    Image(systemName: "return")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(isSelected ? Color.orange.opacity(0.18) : Color.clear)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering in
+            if hovering, let idx = flatItems.firstIndex(where: { $0.id == item.id }) {
+                selectedIndex = idx
             }
         }
     }
@@ -129,9 +188,11 @@ struct CommandKSearchSheet: View {
         isPresented = false
     }
 
-    private func activateFirst() {
-        let first = results.people.first ?? results.meetings.first ?? results.notes.first
-        if let first { activate(first) }
+    private func activateSelected() {
+        guard !flatItems.isEmpty else { return }
+        let idx = clampedIndex
+        guard flatItems.indices.contains(idx) else { return }
+        activate(flatItems[idx])
     }
 }
 
