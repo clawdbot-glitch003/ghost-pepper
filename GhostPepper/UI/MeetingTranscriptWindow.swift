@@ -927,6 +927,21 @@ struct MeetingRootView: View {
         }
     }
 
+    /// Extract `YYYY-MM-DD/<slug>.md` meeting paths from arbitrary prose.
+    /// Tolerates the trailing `:linenumber` form Q&A citations sometimes use.
+    private static func extractMeetingPaths(from text: String) -> Set<String> {
+        let pattern = #"\b\d{4}-\d{2}-\d{2}/[A-Za-z0-9_\-\.]+\.md\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(text.startIndex..., in: text)
+        var found: Set<String> = []
+        for match in regex.matches(in: text, range: range) {
+            if let r = Range(match.range, in: text) {
+                found.insert(String(text[r]))
+            }
+        }
+        return found
+    }
+
     private func applyDossier(pending: MeetingWindowState.PendingDossierApply) {
         let saveDir = state.saveDirectory
         let url = MarkdownArchivePaths.entryURL(in: saveDir, kind: pending.kind, slug: pending.slug)
@@ -954,6 +969,19 @@ struct MeetingRootView: View {
                 var entry = try IndexEntryFile.read(from: url)
                 entry.body = mergedBody
                 entry.lastUpdated = Date()
+
+                // Fold any newly-cited meeting paths into source_meetings.
+                // The Q&A answer + the merged body are scanned for date-folder
+                // path patterns (e.g. "2026-04-28/standup.md"); any not
+                // already in the frontmatter get appended.
+                let cited = Self.extractMeetingPaths(from: summary)
+                    .union(Self.extractMeetingPaths(from: mergedBody))
+                let existing = Set(entry.sourceMeetings)
+                let added = cited.subtracting(existing)
+                if !added.isEmpty {
+                    entry.sourceMeetings = (existing.union(added)).sorted()
+                }
+
                 try IndexEntryFile.write(entry, to: url)
                 for tab in state.indexTabs {
                     if case let .indexEntry(k, s, _) = tab.content, k == pending.kind, s == pending.slug {
