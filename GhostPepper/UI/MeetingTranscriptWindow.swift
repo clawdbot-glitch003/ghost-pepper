@@ -547,7 +547,7 @@ struct MeetingRootView: View {
             // Input row (mostly unchanged)
             Divider()
             HStack(spacing: 8) {
-                Image(systemName: "wand.and.stars")
+                Image(systemName: "cpu")
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
                 TextField("Run agent across meeting data...", text: $qaQuestion)
