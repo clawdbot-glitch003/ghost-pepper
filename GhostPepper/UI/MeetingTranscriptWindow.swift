@@ -44,6 +44,15 @@ final class MeetingTranscriptWindowController: NSObject, NSWindowDelegate {
     var shouldFloatWhileRecording: () -> Bool = { false }
     var pushToTalkDisplayProvider: () -> String = { "" }
 
+    /// Managers + download wrappers that the right-side Models panel needs to
+    /// drive download/delete affordances. Set by AppState during controller
+    /// construction; nil-tolerant so the panel still renders read-only if a
+    /// caller forgets to wire them.
+    var cleanupManager: TextCleanupManager?
+    var modelManager: ModelManager?
+    var usageStats: UsageStatsStore?
+    var onDownloadSpeechModel: ((String) -> Void)?
+
     private(set) var windowState: MeetingWindowState?
 
     func show(session: MeetingSession? = nil) {
@@ -75,7 +84,17 @@ final class MeetingTranscriptWindowController: NSObject, NSWindowDelegate {
             state.addRecordingTab(session: session)
         }
 
-        let view = MeetingRootView(state: state)
+        guard let cleanupManager, let modelManager, let usageStats, let onDownloadSpeechModel else {
+            assertionFailure("MeetingTranscriptWindowController missing manager dependencies")
+            return
+        }
+        let view = MeetingRootView(
+            state: state,
+            cleanupManager: cleanupManager,
+            modelManager: modelManager,
+            usageStats: usageStats,
+            onDownloadSpeechModel: onDownloadSpeechModel
+        )
 
         let screenFrame = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 720, height: 900)
         let windowHeight = screenFrame.height
@@ -606,8 +625,13 @@ final class MeetingWindowState: ObservableObject {
 
 struct MeetingRootView: View {
     @ObservedObject var state: MeetingWindowState
+    let cleanupManager: TextCleanupManager
+    let modelManager: ModelManager
+    let usageStats: UsageStatsStore
+    let onDownloadSpeechModel: (String) -> Void
     @State private var sidebarWidth: CGFloat = 220
     @State private var modelsSidebarWidth: CGFloat = 260
+    @State private var qaResponseHeight: CGFloat = 360
     @State private var qaQuestion = ""
     @State private var qaThread: [QATurn] = []
     @State private var qaIsLoading = false
@@ -616,7 +640,7 @@ struct MeetingRootView: View {
     @StateObject private var qaTranscript: QATranscript = QATranscript()
     @State private var currentQATask: Task<Void, Never>? = nil
     @State private var isApplyingDossier: Bool = false
-    @AppStorage("claudeAPIModel") private var qaModelStorage: String = ClaudeAPIModel.sonnet.rawValue
+    @AppStorage("agentBackend") private var qaAgentBackendStorage: String = "claude:\(ClaudeAPIModel.sonnet.rawValue)"
     @State private var showCommandKSearch: Bool = false
     @State private var showQAMentionSheet: Bool = false
     @State private var qaAttachments: [QAAttachment] = []
@@ -695,14 +719,24 @@ struct MeetingRootView: View {
                             }
                     )
 
-                ModelsSidebarView()
+                RightSidebarView(
+                    cleanupManager: cleanupManager,
+                    modelManager: modelManager,
+                    usageStats: usageStats,
+                    onDownloadSpeechModel: onDownloadSpeechModel
+                )
                     .frame(width: modelsSidebarWidth)
                     .transition(.move(edge: .trailing))
             }
         }
 
-        // App-level Q&A bar
-        appQABar
+        // App-level Q&A: response area sits above the input row, which is
+        // pinned to the bottom via layoutPriority so it never disappears
+        // when the thread grows. Main content (newTabView) is wrapped in a
+        // ScrollView so it can shrink safely without clipping the tab bar.
+        qaResponseArea
+        qaInputArea
+            .layoutPriority(1)
         }
         .frame(minWidth: 500, minHeight: 400)
         .animation(.easeInOut(duration: 0.2), value: state.showSidebar)
@@ -783,7 +817,64 @@ struct MeetingRootView: View {
 
     // MARK: - App-Level Q&A
 
-    private var appQABar: some View {
+    /// True when any of the response-area sections want to render.
+    private var hasQAResponseContent: Bool {
+        let hasDossierApply = state.pendingDossierApply != nil
+            && !(qaThread.last?.answer ?? "").isEmpty
+            && !qaIsLoading
+        return qaIsLoading
+            || !qaTranscript.events.isEmpty
+            || !qaThread.isEmpty
+            || hasDossierApply
+    }
+
+    /// Draggable horizontal handle that resizes `qaResponseHeight`.
+    /// Drag up = grow response area (shrinks main content above); drag down =
+    /// shrink (grows main content above). Clamped to a reasonable min/max so
+    /// the input row is never squeezed out.
+    private var qaResizeHandle: some View {
+        ZStack {
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor).opacity(0.5))
+            // Grip indicator — short horizontal line in the middle so the
+            // drag affordance is discoverable.
+            Capsule()
+                .fill(Color.secondary.opacity(0.6))
+                .frame(width: 36, height: 3)
+        }
+        .frame(height: 8)
+        .contentShape(Rectangle())
+        .onHover { hovering in
+            if hovering {
+                NSCursor.resizeUpDown.push()
+            } else {
+                NSCursor.pop()
+            }
+        }
+        .gesture(
+            DragGesture(minimumDistance: 1)
+                .onChanged { value in
+                    let newHeight = qaResponseHeight - value.translation.height
+                    qaResponseHeight = max(120, min(700, newHeight))
+                }
+        )
+    }
+
+    /// Top portion of the Q&A bar: drag handle + status + trace + conversation
+    /// thread + dossier-apply prompt. Outer height is user-adjustable via the
+    /// drag handle when there's content; collapses to zero when idle.
+    @ViewBuilder
+    private var qaResponseArea: some View {
+        if hasQAResponseContent {
+            VStack(alignment: .leading, spacing: 0) {
+                qaResizeHandle
+                qaResponseContent
+            }
+            .frame(height: qaResponseHeight)
+        }
+    }
+
+    private var qaResponseContent: some View {
         VStack(alignment: .leading, spacing: 0) {
             // Status line + trace toggle + Stop button
             if qaIsLoading || !qaTranscript.events.isEmpty {
@@ -859,7 +950,7 @@ struct MeetingRootView: View {
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
                     }
-                    .frame(maxHeight: 320)
+                    .frame(maxHeight: .infinity)
                     .background(Color(nsColor: .controlBackgroundColor).opacity(0.3))
                     .onChange(of: qaThread.last?.answer) { _, _ in
                         if let last = qaThread.last {
@@ -906,7 +997,14 @@ struct MeetingRootView: View {
                 .padding(.vertical, 8)
                 .background(Color.orange.opacity(0.08))
             }
+        }
+    }
 
+    /// Bottom portion of the Q&A bar: attachment chips + the input row.
+    /// Pinned to the bottom of the window so it stays visible regardless of
+    /// thread length.
+    private var qaInputArea: some View {
+        VStack(alignment: .leading, spacing: 0) {
             // Attachment chips (above input row)
             if !qaAttachments.isEmpty {
                 Divider()
@@ -929,15 +1027,22 @@ struct MeetingRootView: View {
                 Image(systemName: "cpu")
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
-                Picker("", selection: $qaModelStorage) {
-                    ForEach(ClaudeAPIModel.allCases) { model in
-                        Text(model.shortDisplayName).tag(model.rawValue)
+                Picker("", selection: $qaAgentBackendStorage) {
+                    Section("Cloud") {
+                        ForEach(ClaudeAPIModel.allCases) { model in
+                            Text(model.shortDisplayName).tag("claude:\(model.rawValue)")
+                        }
+                    }
+                    Section("Local") {
+                        ForEach(LocalCleanupModelKind.allCases) { kind in
+                            Text(localPickerLabel(for: kind)).tag("local:\(kind.rawValue)")
+                        }
                     }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .frame(maxWidth: 130)
-                .help("Model used for this conversation")
+                .frame(maxWidth: 160)
+                .help("Model used for this conversation. Local models run on-device — slower, free, and best on 8B+ for tool use.")
 
                 TextField(qaPlaceholder, text: $qaQuestion)
                     .textFieldStyle(.plain)
@@ -1005,8 +1110,7 @@ struct MeetingRootView: View {
                         .foregroundStyle(.secondary)
                 }
             } else if !turn.answer.isEmpty {
-                Text(turn.answer)
-                    .font(.system(size: 13))
+                QAAnswerView(source: turn.answer, onLink: handleAnswerLink)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if let usage = turn.usage {
@@ -1046,6 +1150,42 @@ struct MeetingRootView: View {
 
     private var qaPlaceholder: String {
         "Run agent across meeting data..."
+    }
+
+    /// Routes clicks on rendered answer links. Custom `gp://` schemes open
+    /// archive files / dossiers as tabs; everything else falls through to the
+    /// system handler (Safari).
+    private func handleAnswerLink(_ url: URL) -> OpenURLAction.Result {
+        guard url.scheme == "gp" else { return .systemAction }
+
+        let host = url.host ?? ""
+        // Strip leading "/" to get the path (URL parses /foo/bar.md as path).
+        let path = url.path.hasPrefix("/") ? String(url.path.dropFirst()) : url.path
+
+        switch host {
+        case "meeting":
+            let fileURL = state.saveDirectory.appendingPathComponent(path)
+            state.openFile(fileURL)
+            return .handled
+        case "person":
+            // path looks like "people/<slug>" (kind subdirectory + slug)
+            let parts = path.split(separator: "/", maxSplits: 1).map(String.init)
+            guard parts.count == 2,
+                  let kind = IndexKind(rawValue: parts[0]) else { return .discarded }
+            state.openIndexEntry(kind: kind, slug: parts[1])
+            return .handled
+        default:
+            return .discarded
+        }
+    }
+
+    private func localPickerLabel(for kind: LocalCleanupModelKind) -> String {
+        switch kind {
+        case .qwen35_0_8b_q4_k_m: return "Qwen 3.5 0.8B (local)"
+        case .qwen35_2b_q4_k_m: return "Qwen 3.5 2B (local)"
+        case .qwen35_4b_q4_k_m: return "Qwen 3.5 4B (local)"
+        case .deepseek_r1_qwen_7b_q4_k_m: return "DeepSeek R1 7B (local)"
+        }
     }
 
     private func formatTraceLine(_ event: QAEvent) -> String {
@@ -1393,26 +1533,28 @@ struct MeetingRootView: View {
     }
 
     private var newTabView: some View {
-        VStack(spacing: 24) {
-            homeBrandHeader
-                .padding(.top, 16)
+        ScrollView {
+            VStack(spacing: 24) {
+                homeBrandHeader
+                    .padding(.top, 16)
 
-            if !GoogleCalendarService.shared.isSignedIn {
-                disconnectedQuickActions
+                if !GoogleCalendarService.shared.isSignedIn {
+                    disconnectedQuickActions
+                }
+
+                if GranolaImporter.isCacheAvailable {
+                    granolaSyncRow
+                        .padding(.top, GoogleCalendarService.shared.isSignedIn ? 8 : 0)
+                }
+
+                peopleIndexRow
+                    .padding(.top, 4)
+
+                todayCalendarSection
+                    .padding(.top, (GoogleCalendarService.shared.isSignedIn && !GranolaImporter.isCacheAvailable) ? 8 : 0)
             }
-
-            if GranolaImporter.isCacheAvailable {
-                granolaSyncRow
-                    .padding(.top, GoogleCalendarService.shared.isSignedIn ? 8 : 0)
-            }
-
-            peopleIndexRow
-                .padding(.top, 4)
-
-            todayCalendarSection
-                .padding(.top, (GoogleCalendarService.shared.isSignedIn && !GranolaImporter.isCacheAvailable) ? 8 : 0)
-
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity)
+            .padding(.bottom, 16)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .sheet(isPresented: $showGranolaImport, onDismiss: { refreshGranolaPendingCount() }) {
@@ -1553,9 +1695,25 @@ struct MeetingRootView: View {
                 .buttonStyle(.plain)
                 .help("Sync with Granola")
             } else {
-                Text("Checking Granola…")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+                // Pending count is nil — either we haven't parsed yet, or
+                // Granola's cache schema changed under us. Either way, just
+                // expose the sync sheet directly and let the user trigger it.
+                Button {
+                    showGranolaImport = true
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Sync Granola")
+                            .font(.system(size: 12, weight: .medium))
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 5)
+                    .background(Capsule().fill(Color.orange.opacity(0.85)))
+                    .foregroundColor(.white)
+                }
+                .buttonStyle(.plain)
+                .help("Open the Granola sync sheet")
             }
             Spacer()
         }
@@ -2004,20 +2162,25 @@ private struct HomeTabView: View {
     let onSelect: () -> Void
 
     var body: some View {
-        Button(action: onSelect) {
+        HStack(spacing: 6) {
             Image(systemName: isActive ? "house.fill" : "house")
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: 11))
+                .foregroundColor(isActive ? .orange : .secondary)
+            Text("Home")
+                .font(.system(size: 12))
                 .foregroundColor(isActive ? .primary : .secondary)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 7)
-                .background(isActive ? Color(nsColor: .textBackgroundColor) : Color.clear)
-                .overlay(alignment: .bottom) {
-                    if isActive {
-                        Rectangle().fill(Color.orange).frame(height: 2)
-                    }
-                }
+                .lineLimit(1)
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(isActive ? Color(nsColor: .textBackgroundColor) : Color.clear)
+        .overlay(alignment: .bottom) {
+            if isActive {
+                Rectangle().fill(Color.orange).frame(height: 2)
+            }
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { onSelect() }
         .help("Home")
     }
 }

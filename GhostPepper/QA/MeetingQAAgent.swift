@@ -4,7 +4,7 @@ typealias AgentToolHandler = ([String: Any]) async throws -> String
 
 final class MeetingQAAgent {
     private let provider: LLMProvider
-    private let model: ClaudeAPIModel
+    private let backend: AgentBackend
     private let systemPrompt: String
     private let toolHandlers: [String: AgentToolHandler]
     private let toolDefinitions: [LLMTool]
@@ -17,7 +17,7 @@ final class MeetingQAAgent {
     /// scoped to the meeting archive.
     convenience init(
         provider: LLMProvider,
-        model: ClaudeAPIModel,
+        backend: AgentBackend,
         archiveRoot: URL,
         maxIterations: Int = 15
     ) {
@@ -43,8 +43,12 @@ final class MeetingQAAgent {
         ]
         self.init(
             provider: provider,
-            model: model,
-            systemPrompt: MeetingQASystemPrompt.build(archiveRootPath: archiveRoot.path),
+            backend: backend,
+            systemPrompt: MeetingQASystemPrompt.build(
+                archiveRootPath: archiveRoot.path,
+                backend: backend,
+                maxIterations: maxIterations
+            ),
             toolHandlers: handlers,
             toolDefinitions: Self.qaToolDefinitions(),
             summarizeInput: Self.summarizeQAInput,
@@ -58,7 +62,7 @@ final class MeetingQAAgent {
     /// write_file) so the same loop drives a different task.
     init(
         provider: LLMProvider,
-        model: ClaudeAPIModel,
+        backend: AgentBackend,
         systemPrompt: String,
         toolHandlers: [String: AgentToolHandler],
         toolDefinitions: [LLMTool],
@@ -67,7 +71,7 @@ final class MeetingQAAgent {
         maxIterations: Int = 15
     ) {
         self.provider = provider
-        self.model = model
+        self.backend = backend
         self.systemPrompt = systemPrompt
         self.toolHandlers = toolHandlers
         self.toolDefinitions = toolDefinitions
@@ -96,6 +100,8 @@ final class MeetingQAAgent {
     private func runLoop(initialMessages: [LLMMessage], continuation: AsyncThrowingStream<QAEvent, Error>.Continuation) async {
         var messages: [LLMMessage] = initialMessages
         var cumulativeUsage = ProviderUsage.zero
+        var hasUsedTools = false
+        var didSynthesisFallback = false
 
         for _ in 0..<maxIterations {
             if Task.isCancelled {
@@ -147,6 +153,7 @@ final class MeetingQAAgent {
             emitUsage(cumulativeUsage, continuation: continuation)
 
             if !pendingToolCalls.isEmpty {
+                hasUsedTools = true
                 messages.append(LLMMessage(role: .assistant, content: assistantBlocks))
 
                 var toolResultBlocks: [LLMContentBlock] = []
@@ -162,6 +169,25 @@ final class MeetingQAAgent {
 
             switch stopReason {
             case .endTurn:
+                // Synthesis fallback: weak local models sometimes do tool calls
+                // and then stop without writing an answer. Push them once with
+                // an explicit "now answer" message before giving up. Skipped if
+                // no tools were used (the model genuinely had nothing to find)
+                // or if we already tried synthesis once.
+                if assistantTextBuffer.isEmpty && hasUsedTools && !didSynthesisFallback {
+                    didSynthesisFallback = true
+                    if !assistantBlocks.isEmpty {
+                        messages.append(LLMMessage(role: .assistant, content: assistantBlocks))
+                    }
+                    let synthesisPrompt = """
+                    Now write your final answer to the user's original question, citing source files as path:line. \
+                    If your searches did not find enough to answer fully, summarize what you searched, what you found, \
+                    and what the closest match was. Do not call any more tools — just write the answer.
+                    """
+                    messages.append(LLMMessage(role: .user, content: [.text(synthesisPrompt)]))
+                    continuation.yield(.status("Synthesizing answer from tool results…"))
+                    continue
+                }
                 continuation.finish()
                 return
             case .maxTokens:
@@ -195,21 +221,14 @@ final class MeetingQAAgent {
     }
 
     private func emitUsage(_ usage: ProviderUsage, continuation: AsyncThrowingStream<QAEvent, Error>.Continuation) {
-        let cost = ClaudePricing.estimateCostUSD(
-            model: model,
-            inputTokens: usage.inputTokens,
-            outputTokens: usage.outputTokens,
-            cacheReadTokens: usage.cacheReadTokens,
-            cacheWriteTokens: usage.cacheWriteTokens
-        )
         continuation.yield(.usage(QAUsage(
-            modelDisplayName: model.shortDisplayName,
+            modelDisplayName: backend.shortDisplayName,
             inputTokens: usage.inputTokens,
             outputTokens: usage.outputTokens,
             cacheReadTokens: usage.cacheReadTokens,
             cacheWriteTokens: usage.cacheWriteTokens,
-            estimatedCostUSD: cost,
-            isLocal: false
+            estimatedCostUSD: backend.estimatedCostUSD(usage: usage),
+            isLocal: backend.isLocal
         )))
     }
 
@@ -245,7 +264,7 @@ final class MeetingQAAgent {
     static func qaToolDefinitions() -> [LLMTool] {
         let grep = LLMTool(
             name: "grep",
-            description: "Search the meeting archive for a regex pattern. Returns matching lines with file paths and line numbers. Prefer this over read_file when looking for names, dates, or specific phrases — it's much cheaper than reading whole files.",
+            description: "Search the meeting archive for a regex pattern. Returns each match with 2 lines of context before and after, so you usually have enough to answer without a follow-up read_file. Match groups are separated by `--`. Lines marked with `:` are matches; lines marked with `-` are surrounding context. Prefer this over read_file when looking for names, dates, or specific phrases — it's much cheaper than reading whole files.",
             inputSchema: [
                 "type": "object",
                 "properties": [

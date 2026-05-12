@@ -55,6 +55,7 @@ enum LocalCleanupModelKind: String, CaseIterable, Equatable, Identifiable {
     case qwen35_0_8b_q4_k_m
     case qwen35_2b_q4_k_m
     case qwen35_4b_q4_k_m
+    case deepseek_r1_qwen_7b_q4_k_m
 
     var id: String { rawValue }
 
@@ -147,10 +148,27 @@ final class TextCleanupManager: ObservableObject, TextCleaningManaging {
         recommendation: .full
     )
 
+    /// DeepSeek R1 Distill Qwen 7B — Qwen 2.5 7B base distilled from R1
+    /// reasoning traces. Stronger chain-of-thought for agent tool-use loops
+    /// than vanilla Qwen 4B. Always emits `<think>...</think>` blocks before
+    /// answers; the QwenToolCallParser strips those so they don't surface as
+    /// visible text. Cleanup-quality is unverified — primarily added for the
+    /// agent path.
+    static let deepseekR1Qwen7BModel = CleanupModelDescriptor(
+        kind: .deepseek_r1_qwen_7b_q4_k_m,
+        displayName: "DeepSeek R1 Distill Qwen 7B Q4_K_M",
+        sizeDescription: "~4.7 GB",
+        fileName: "DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
+        url: "https://huggingface.co/bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF/resolve/main/DeepSeek-R1-Distill-Qwen-7B-Q4_K_M.gguf",
+        maxTokenCount: 8192,
+        recommendation: nil
+    )
+
     static let cleanupModels = [
         compactModel,
         recommendedFastModel,
         recommendedFullModel,
+        deepseekR1Qwen7BModel,
     ]
     static let fastModel = recommendedFastModel
     static let fullModel = recommendedFullModel
@@ -192,6 +210,10 @@ final class TextCleanupManager: ObservableObject, TextCleaningManaging {
     private let probeExecutionGate = CleanupProbeExecutionGate()
     private var promptPrefillTask: Task<Void, Never>?
     private var preparedPromptContext: PreparedPromptContext?
+    /// Tracks the in-flight download/load Task so the UI can cancel it. We
+    /// only allow one load at a time (the manager has a single `activeLLM`
+    /// slot), so a Task? is sufficient.
+    private var activeLoadTask: Task<Void, Never>?
 
     init(
         defaults: UserDefaults = .standard,
@@ -234,18 +256,26 @@ final class TextCleanupManager: ObservableObject, TextCleaningManaging {
     }
 
     private var modelsDirectory: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        return appSupport.appendingPathComponent("GhostPepper/models", isDirectory: true)
+        Self.modelsDirectory
     }
 
     private func modelPath(for fileName: String) -> URL {
         modelsDirectory.appendingPathComponent(fileName)
     }
 
+    static var modelsDirectory: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return appSupport.appendingPathComponent("GhostPepper/models", isDirectory: true)
+    }
+
+    static func isModelDownloaded(_ kind: LocalCleanupModelKind) -> Bool {
+        guard let desc = cleanupModels.first(where: { $0.kind == kind }) else { return false }
+        let path = modelsDirectory.appendingPathComponent(desc.fileName)
+        return FileManager.default.fileExists(atPath: path.path)
+    }
+
     func isModelDownloaded(_ kind: LocalCleanupModelKind) -> Bool {
-        let desc = Self.cleanupModels.first(where: { $0.kind == kind })
-        guard let fileName = desc?.fileName else { return false }
-        return FileManager.default.fileExists(atPath: modelPath(for: fileName).path)
+        Self.isModelDownloaded(kind)
     }
 
     func deleteCachedModel(kind: LocalCleanupModelKind) {
@@ -310,6 +340,52 @@ final class TextCleanupManager: ObservableObject, TextCleaningManaging {
             )
             throw CleanupBackendError.unavailable
         }
+    }
+
+    /// Streams raw completion tokens from a local Qwen model using a
+    /// fully-formed prompt string. The caller is responsible for any
+    /// chat-template framing (e.g. Qwen3's `<|im_start|>` markers); this method
+    /// passes the prompt straight to the model and yields tokens as they
+    /// arrive. Used by `LocalLLMProvider` to drive the agent loop.
+    ///
+    /// Acquires the same probe gate as `clean()` so concurrent local cleanup
+    /// and agent runs don't share KV-cache state.
+    func streamCompletion(
+        prompt: String,
+        modelKind: LocalCleanupModelKind? = nil
+    ) async throws -> AsyncStream<String> {
+        let requestedModelKind = modelKind ?? selectedCleanupModelKind
+        await loadModel(kind: requestedModelKind)
+
+        guard let llm = model(for: requestedModelKind) else {
+            debugLogger?(
+                .cleanup,
+                "Skipped local stream completion because model \(requestedModelKind.rawValue) was not ready."
+            )
+            throw CleanupBackendError.unavailable
+        }
+
+        await probeExecutionGate.acquire()
+        await llm.core.resetContext()
+
+        let (stream, continuation) = AsyncStream<String>.makeStream()
+        let gate = probeExecutionGate
+        let task = Task { @MainActor in
+            let response = await llm.core.generateResponseStream(
+                from: prompt,
+                thinking: ThinkingMode.suppressed
+            )
+            for await token in response {
+                if Task.isCancelled { break }
+                continuation.yield(token)
+            }
+            await gate.release()
+            continuation.finish()
+        }
+        continuation.onTermination = { _ in
+            task.cancel()
+        }
+        return stream
     }
 
     func startPromptPrefill(systemPromptPrefix: String, modelKind: LocalCleanupModelKind? = nil) {
@@ -488,9 +564,21 @@ final class TextCleanupManager: ObservableObject, TextCleaningManaging {
             do {
                 try await downloadModel(kind: kind, url: descriptor.url, to: path)
             } catch {
-                self.errorMessage = "Failed to download cleanup model: \(error.localizedDescription)"
-                self.state = .error
-                debugLogger?(.model, self.errorMessage ?? "Failed to download cleanup model.")
+                // User-initiated cancellation should drop the row back to
+                // "not downloaded" without surfacing a scary red error.
+                let nsError = error as NSError
+                let isCancelled = error is CancellationError
+                    || nsError.code == NSURLErrorCancelled
+                    || (nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled)
+                if isCancelled {
+                    self.state = .idle
+                    self.errorMessage = nil
+                    debugLogger?(.model, "Cleanup model download cancelled: \(descriptor.displayName).")
+                } else {
+                    self.errorMessage = "Failed to download cleanup model: \(error.localizedDescription)"
+                    self.state = .error
+                    debugLogger?(.model, self.errorMessage ?? "Failed to download cleanup model.")
+                }
                 return
             }
         }
@@ -522,6 +610,43 @@ final class TextCleanupManager: ObservableObject, TextCleaningManaging {
         state = .ready
         errorMessage = nil
         debugLogger?(.model, "Local cleanup model ready: \(descriptor.displayName).")
+    }
+
+    /// Kicks off a tracked `loadModel(kind:)` so callers can later cancel it
+    /// via `cancelActiveLoad()`. If a load Task is already in flight for the
+    /// same kind, returns without starting a duplicate; otherwise the prior
+    /// Task is cancelled and replaced.
+    func startLoad(kind: LocalCleanupModelKind) {
+        if let activeLoadTask, !activeLoadTask.isCancelled,
+           case let .downloading(activeKind, _) = state, activeKind == kind {
+            return
+        }
+        if let activeLoadTask, !activeLoadTask.isCancelled,
+           case let .loadingModel(activeKind) = state, activeKind == kind {
+            return
+        }
+        activeLoadTask?.cancel()
+        activeLoadTask = Task { @MainActor [weak self] in
+            await self?.loadModel(kind: kind)
+            self?.activeLoadTask = nil
+        }
+    }
+
+    /// Cancels whatever the manager is currently downloading or loading.
+    /// `URLSession.download(from:)` is cancellation-aware, so the in-flight
+    /// transfer aborts at the next suspension point.
+    func cancelActiveLoad() {
+        activeLoadTask?.cancel()
+        activeLoadTask = nil
+    }
+
+    /// Surface for UI: is there an active load Task we can cancel? Used to
+    /// decide whether to render the cancel affordance — passively-displayed
+    /// progress (e.g. a stale `.downloading` from a prior session) shouldn't
+    /// show one.
+    var isLoadCancellable: Bool {
+        guard let activeLoadTask else { return false }
+        return !activeLoadTask.isCancelled
     }
 
     func unloadModel() {

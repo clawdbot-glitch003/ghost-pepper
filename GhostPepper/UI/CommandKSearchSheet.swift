@@ -6,6 +6,9 @@ import SwiftUI
 struct CommandKSearchSheet: View {
     @ObservedObject var state: MeetingWindowState
     @Binding var isPresented: Bool
+    /// When provided, selecting a result calls this instead of opening the
+    /// item as a tab. Used by the Q&A `@`-mention picker to attach context.
+    var onAttach: ((CommandKHaystackEntry) -> Void)? = nil
 
     @State private var query: String = ""
     @State private var selectedIndex: Int = 0
@@ -55,7 +58,7 @@ struct CommandKSearchSheet: View {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
-            TextField("Search people, meetings, notes…", text: $query)
+            TextField(onAttach == nil ? "Search people, meetings, notes…" : "Attach context: search people, meetings, notes…", text: $query)
                 .textFieldStyle(.plain)
                 .font(.system(size: 16))
                 .focused($fieldFocused)
@@ -187,7 +190,11 @@ struct CommandKSearchSheet: View {
     }
 
     private func activate(_ item: CommandKItem) {
-        item.activate(state)
+        if let onAttach, let entry = haystack.first(where: { $0.id == item.id }) {
+            onAttach(entry)
+        } else {
+            item.activate(state)
+        }
         isPresented = false
     }
 

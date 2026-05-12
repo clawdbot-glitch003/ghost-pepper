@@ -618,6 +618,10 @@ final class ModelManager: ObservableObject {
         }
     }
 
+    static func isCached(_ model: SpeechModelDescriptor) -> Bool {
+        modelIsCached(model)
+    }
+
     private static func modelIsCached(_ model: SpeechModelDescriptor) -> Bool {
         switch model.backend {
         case .whisperKit:

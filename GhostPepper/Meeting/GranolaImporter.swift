@@ -33,6 +33,9 @@ final class GranolaImporter: ObservableObject {
 
     nonisolated private static let cachePath = NSHomeDirectory() + "/Library/Application Support/Granola/cache-v6.json"
     private static let debugLogPath = "/tmp/granola_import_debug.log"
+    /// Suffix appended to every local-cache failure message so the user
+    /// knows the API path is still a live option.
+    private static let apiPivotHint = "Use the API-key path below — get a key from Granola Settings → API Key → Create new key."
 
     private static func debugLog(_ msg: String) {
         let line = "[\(Date())] \(msg)\n"
@@ -96,7 +99,7 @@ final class GranolaImporter: ObservableObject {
         state = .importingLocal
 
         guard let data = FileManager.default.contents(atPath: Self.cachePath) else {
-            state = .error("Could not read Granola cache file.")
+            state = .error("Could not read Granola cache file. \(Self.apiPivotHint)")
             return 0
         }
 
@@ -104,7 +107,15 @@ final class GranolaImporter: ObservableObject {
               let cache = json["cache"] as? [String: Any],
               let stateDict = cache["state"] as? [String: Any],
               let documents = stateDict["documents"] as? [String: [String: Any]] else {
-            state = .error("Could not parse Granola cache structure.")
+            // Granola v6 ships an encrypted store alongside the plain JSON;
+            // when the plain file is just UI state without `documents`, the
+            // encrypted sibling is where the actual data lives.
+            let encryptedPath = Self.cachePath + ".enc"
+            if FileManager.default.fileExists(atPath: encryptedPath) {
+                state = .error("Granola v6 encrypts its local cache (cache-v6.json.enc). The local-cache importer can't read it. \(Self.apiPivotHint)")
+            } else {
+                state = .error("Could not parse Granola cache structure. \(Self.apiPivotHint)")
+            }
             return 0
         }
 
@@ -275,6 +286,17 @@ final class GranolaImporter: ObservableObject {
                 }
             }
 
+            // Diagnostic: log every API response's top-level keys plus a
+            // truncated peek at each value. Users (specifically Matt) need
+            // this to find where Granola stashes user-typed panel notes.
+            // Once we know the field name, this can be removed or gated.
+            Self.debugLog("[GranolaImporter] API keys for \(title.prefix(60)): \(fullNote.keys.sorted())")
+            for (k, v) in fullNote.sorted(by: { $0.key < $1.key }) {
+                let typeDesc = String(describing: type(of: v))
+                let valuePeek = String(describing: v).prefix(160).replacingOccurrences(of: "\n", with: " ")
+                Self.debugLog("[GranolaImporter]   \(k) (\(typeDesc)): \(valuePeek)")
+            }
+
             // Extract content from API response
             // API uses summary_markdown/summary_text (not "summary") and no separate notes/chapters fields
             let transcript = Self.extractTranscript(from: fullNote["transcript"])
@@ -295,18 +317,38 @@ final class GranolaImporter: ObservableObject {
                 try? await Task.sleep(nanoseconds: 200_000_000)
                 continue
             }
-            Self.debugLog("[GranolaImporter] Writing \(title) — transcript:\(!transcript.isEmpty) summary:\(apiSummary != nil) notes:\(apiNotes != nil) chapters:\(apiChapters != nil)")
+
+            // Merge with whatever's already on disk so we don't clobber
+            // user-typed Notes (or any other section) when the API response
+            // is missing that field.
+            let existingMarkdown: String? = fileExists
+                ? (try? String(contentsOf: filePath, encoding: .utf8))
+                : nil
+            let existingNotes = existingMarkdown.flatMap { Self.extractSectionBody(from: $0, header: "Notes") }
+            let existingSummary = existingMarkdown.flatMap { Self.extractSectionBody(from: $0, header: "Summary") }
+            let existingTranscript = existingMarkdown.flatMap { Self.extractSectionBody(from: $0, header: "Transcript") }
+            let existingChapters = existingMarkdown.flatMap { Self.extractSectionBody(from: $0, header: "Chapters") }
+
+            let mergedNotes = (apiNotes?.isEmpty == false ? apiNotes : existingNotes)
+            let mergedSummary = (apiSummary?.isEmpty == false ? apiSummary : existingSummary)
+            let mergedTranscript = !transcript.isEmpty ? transcript : (existingTranscript ?? "")
+            // For chapters: prefer the structured API array; otherwise fall
+            // back to whatever was already in the file as preformatted body.
+            let mergedChaptersMarkdown: String? = (apiChapters?.isEmpty == false) ? nil : existingChapters
+
+            Self.debugLog("[GranolaImporter] Writing \(title) — transcript:\(!mergedTranscript.isEmpty) summary:\(mergedSummary != nil) notes:\(mergedNotes != nil) chapters:\(apiChapters != nil ? "api" : (existingChapters != nil ? "existing" : "none"))")
 
             // Build full markdown with all available content
             let markdown = Self.buildMarkdown(
                 docId: noteId,
                 title: title,
                 createdAt: createdAt,
-                summary: apiSummary,
-                notes: apiNotes,
+                summary: mergedSummary,
+                notes: mergedNotes,
                 chapters: apiChapters,
                 people: fullNote["people"],
-                transcript: transcript.isEmpty ? nil : transcript
+                transcript: mergedTranscript.isEmpty ? nil : mergedTranscript,
+                chaptersMarkdown: mergedChaptersMarkdown
             )
 
             let dir = directory.appendingPathComponent(dateFolder)
@@ -366,6 +408,30 @@ final class GranolaImporter: ObservableObject {
         return []
     }
 
+    /// Extracts the body of a `## <header>` section from an existing markdown
+    /// file. Used during API enrichment to preserve sections the API didn't
+    /// re-supply. Returns the section body trimmed of surrounding whitespace,
+    /// or nil if the header isn't present.
+    private static func extractSectionBody(from markdown: String, header: String) -> String? {
+        let lines = markdown.components(separatedBy: "\n")
+        let target = "## \(header)"
+        var inSection = false
+        var collected: [String] = []
+        for line in lines {
+            if line == target {
+                inSection = true
+                continue
+            }
+            if inSection {
+                if line.hasPrefix("## ") { break }
+                collected.append(line)
+            }
+        }
+        guard inSection else { return nil }
+        let joined = collected.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+        return joined.isEmpty ? nil : joined
+    }
+
     private static func extractTranscript(from transcriptData: Any?) -> String {
         guard let data = transcriptData else { return "" }
 
@@ -391,7 +457,8 @@ final class GranolaImporter: ObservableObject {
         notes: String?,
         chapters: [[String: Any]]?,
         people: Any?,
-        transcript: String? = nil
+        transcript: String? = nil,
+        chaptersMarkdown: String? = nil
     ) -> String {
         let attendees = extractAttendees(from: people)
 
@@ -432,7 +499,9 @@ final class GranolaImporter: ObservableObject {
             lines.append("")
         }
 
-        // Chapters
+        // Chapters — prefer the structured array; fall back to a preformatted
+        // body (used when merging from an existing file that the API didn't
+        // re-supply chapters for).
         if let chapters = chapters, !chapters.isEmpty {
             lines.append("## Chapters")
             lines.append("")
@@ -448,6 +517,11 @@ final class GranolaImporter: ObservableObject {
                     lines.append("")
                 }
             }
+        } else if let chaptersMarkdown = chaptersMarkdown, !chaptersMarkdown.isEmpty {
+            lines.append("## Chapters")
+            lines.append("")
+            lines.append(chaptersMarkdown)
+            lines.append("")
         }
 
         // Transcript

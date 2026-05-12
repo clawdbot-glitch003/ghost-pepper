@@ -44,7 +44,7 @@ final class MeetingQAAgentTests: XCTestCase {
                 .stop(reason: .endTurn, usage: ProviderUsage(inputTokens: 100, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0)),
             ]
         ])
-        let agent = MeetingQAAgent(provider: provider, model: .sonnet, archiveRoot: rootDir, maxIterations: 15)
+        let agent = MeetingQAAgent(provider: provider, backend: .claude(.sonnet), archiveRoot: rootDir, maxIterations: 15)
 
         var collected = ""
         var sawUsage = false
@@ -70,7 +70,7 @@ final class MeetingQAAgentTests: XCTestCase {
                 .stop(reason: .endTurn, usage: ProviderUsage(inputTokens: 80, outputTokens: 8, cacheReadTokens: 0, cacheWriteTokens: 0)),
             ],
         ])
-        let agent = MeetingQAAgent(provider: provider, model: .sonnet, archiveRoot: rootDir, maxIterations: 15)
+        let agent = MeetingQAAgent(provider: provider, backend: .claude(.sonnet), archiveRoot: rootDir, maxIterations: 15)
 
         var sawToolCall = false
         var sawToolResult = false
@@ -95,7 +95,7 @@ final class MeetingQAAgentTests: XCTestCase {
             .stop(reason: .toolUse, usage: ProviderUsage(inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0)),
         ]
         let provider = MockProvider(scripts: Array(repeating: infiniteToolUse, count: 20))
-        let agent = MeetingQAAgent(provider: provider, model: .sonnet, archiveRoot: rootDir, maxIterations: 3)
+        let agent = MeetingQAAgent(provider: provider, backend: .claude(.sonnet), archiveRoot: rootDir, maxIterations: 3)
 
         var statuses: [String] = []
         for try await event in agent.ask("Loop forever") {
@@ -116,7 +116,7 @@ final class MeetingQAAgentTests: XCTestCase {
                 .stop(reason: .endTurn, usage: ProviderUsage(inputTokens: 60, outputTokens: 6, cacheReadTokens: 0, cacheWriteTokens: 0)),
             ],
         ])
-        let agent = MeetingQAAgent(provider: provider, model: .sonnet, archiveRoot: rootDir, maxIterations: 15)
+        let agent = MeetingQAAgent(provider: provider, backend: .claude(.sonnet), archiveRoot: rootDir, maxIterations: 15)
 
         var sawErrorResult = false
         for try await event in agent.ask("Read forbidden") {

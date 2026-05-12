@@ -6,6 +6,10 @@ import ServiceManagement
 extension Notification.Name {
     static let showSettingsSection = Notification.Name("showSettingsSection")
     static let meetingRecordingStopped = Notification.Name("meetingRecordingStopped")
+    static let granolaImported = Notification.Name("granolaImported")
+    /// Posted after `IndexBuilder.augmentGeneration` finishes stamping a
+    /// freshly-written index entry. `object` is the `IndexKind`.
+    static let indexEntryWritten = Notification.Name("indexEntryWritten")
 }
 
 final class SettingsWindowController: NSObject, NSWindowDelegate {

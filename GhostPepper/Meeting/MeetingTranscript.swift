@@ -58,7 +58,12 @@ final class MeetingTranscript: ObservableObject {
     @Published var attendees: [MeetingAttendee]
     @Published var summary: String?
     @Published var isGeneratingSummary = false
+    /// Saved article body for Reader entries. When non-nil, this entry is treated
+    /// as a reader (Article + Notes tabs) instead of a meeting (Notes + Transcript + Summary).
+    @Published var articleBody: String?
     var importedFrom: String?
+    /// Optional source URL — used by Reader entries.
+    var sourceURL: String?
 
     let sessionID: UUID
 

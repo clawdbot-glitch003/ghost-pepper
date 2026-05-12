@@ -121,6 +121,7 @@ class AppState: ObservableObject {
     let hotkeyMonitor: HotkeyMonitoring
     let overlay = RecordingOverlayController()
     let textCleanupManager: TextCleanupManager
+    let usageStats = UsageStatsStore()
     let frontmostWindowOCRService: FrontmostWindowOCRService
     let cleanupPromptBuilder: CleanupPromptBuilder
     let correctionStore: CorrectionStore
@@ -154,6 +155,8 @@ class AppState: ObservableObject {
     private var cleanupStateObserver: AnyCancellable?
     private var modelStateObserver: AnyCancellable?
     private var pushToTalkChordObserver: AnyCancellable?
+    private var granolaImportObserver: AnyCancellable?
+    private var peopleIndexEntryObserver: AnyCancellable?
     private let recordingOCRPrefetch: RecordingOCRPrefetch
     private let speakerIdentityResolver = SpeakerIdentityResolver()
     private var activePerformanceTrace: PerformanceTrace?
@@ -321,6 +324,39 @@ class AppState: ObservableObject {
                 self?.objectWillChange.send()
             }
         }
+
+        // One-time backfill of historical Meetings/Granola/People counts
+        // from the existing meetings archive. Idempotent — the store gates
+        // itself on a UserDefaults sentinel.
+        Task { @MainActor [usageStats] in
+            usageStats.backfillFromDisk(
+                meetingsSaveDir: MeetingTranscriptSettings.effectiveSaveDirectory()
+            )
+        }
+
+        // Granola import notifications carry the imported-document count as
+        // their `object`; we count each imported note as one usage event.
+        granolaImportObserver = NotificationCenter.default
+            .publisher(for: .granolaImported)
+            .sink { [weak self] note in
+                let count = (note.object as? Int) ?? 1
+                Task { @MainActor in
+                    self?.usageStats.record(.granolaImport, count: count)
+                }
+            }
+
+        // People index entries fire `.indexEntryWritten` after each
+        // `write_file` is finalized by the agent. We only count `.people` —
+        // future index kinds would need their own counters or a separate
+        // bucket.
+        peopleIndexEntryObserver = NotificationCenter.default
+            .publisher(for: .indexEntryWritten)
+            .sink { [weak self] note in
+                guard let kind = note.object as? IndexKind, kind == .people else { return }
+                Task { @MainActor in
+                    self?.usageStats.record(.peoplePage)
+                }
+            }
 
         // Keep the meeting Q&A placeholder in sync with the current PTT chord.
         pushToTalkChordObserver = self.$pushToTalkChord
@@ -774,6 +810,7 @@ class AppState: ObservableObject {
         )
 
         if didProduceTranscript {
+            usageStats.record(.dictation)
             overlay.dismiss(ifShowing: .transcribing)
             overlay.dismiss(ifShowing: .cleaningUp)
         } else {
@@ -1035,16 +1072,26 @@ class AppState: ObservableObject {
                     continuation.finish()
                     return
                 }
-                guard let key = KeychainHelper.get(AnthropicProvider.keychainKey), !key.isEmpty else {
-                    Task { @MainActor in self.showSettings(section: .meetingTranscript) }
-                    continuation.yield(.error("Add your Claude API key to continue — Settings opened."))
-                    continuation.finish()
-                    return
-                }
-                let model = ClaudeAPIModel(rawValue: self.claudeAPIModel) ?? .sonnet
-                let provider = AnthropicProvider(model: model, apiKey: key)
+                self.usageStats.record(.qaQuestion)
+                let backend = AgentBackend.resolveFromDefaults()
                 let archiveRoot = MeetingTranscriptSettings.effectiveSaveDirectory()
-                let agent = MeetingQAAgent(provider: provider, model: model, archiveRoot: archiveRoot, maxIterations: 15)
+                let provider: LLMProvider
+                let maxIterations: Int
+                switch backend {
+                case .claude(let model):
+                    guard let key = KeychainHelper.get(AnthropicProvider.keychainKey), !key.isEmpty else {
+                        Task { @MainActor in self.showSettings(section: .meetingTranscript) }
+                        continuation.yield(.error("Add your Claude API key to continue — Settings opened."))
+                        continuation.finish()
+                        return
+                    }
+                    provider = AnthropicProvider(model: model, apiKey: key)
+                    maxIterations = 15
+                case .local(let kind):
+                    provider = LocalLLMProvider(cleanupManager: self.textCleanupManager, modelKind: kind)
+                    maxIterations = 10
+                }
+                let agent = MeetingQAAgent(provider: provider, backend: backend, archiveRoot: archiveRoot, maxIterations: maxIterations)
                 // Build the conversation: every prior (Q, A) becomes alternating
                 // user/assistant messages, then the new question is appended.
                 var messages: [LLMMessage] = []
@@ -1070,6 +1117,14 @@ class AppState: ObservableObject {
         }
         controller.onMakeIndexBuilder = { [weak self] kind in
             self?.makeIndexBuilder(for: kind)
+        }
+        controller.cleanupManager = textCleanupManager
+        controller.modelManager = modelManager
+        controller.usageStats = usageStats
+        controller.onDownloadSpeechModel = { [weak self] name in
+            guard let self else { return }
+            self.speechModel = name
+            Task { await self.loadSpeechModel(name: name) }
         }
         return controller
     }()
@@ -1269,9 +1324,13 @@ class AppState: ObservableObject {
         }
         activeMeetingSession = session
 
-        Task {
+        Task { @MainActor in
             do {
                 try await session.start()
+                // Count the attempt — usage-report semantics value "how often
+                // does the user try to use this?" over "did the file save."
+                // Captures abandoned/cancelled recordings too.
+                usageStats.record(.meetingRecord)
                 debugLogStore.record(category: .model, message: "Meeting transcription started: \(name)")
             } catch {
                 debugLogStore.record(category: .model, message: "Meeting transcription failed to start: \(error.localizedDescription)")

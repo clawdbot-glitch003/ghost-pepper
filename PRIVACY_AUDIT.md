@@ -14,7 +14,7 @@ Paste the following prompt into Claude Code (or any AI assistant with codebase a
 > 4. **Meeting transcription & summarization** — chunked transcription, markdown storage, and LLM summary generation all happen locally. No meeting content leaves the device.
 > 5. **OCR & screen capture** — Vision framework runs on-device. Screenshots are processed locally and never transmitted.
 > 6. **File storage** — all meeting notes, transcripts, and summaries are saved as local markdown files. No cloud sync, no remote backup.
-> 7. **No analytics or telemetry** — confirm there are no tracking SDKs (Firebase, Mixpanel, Sentry, Amplitude, PostHog, Datadog, Segment, etc.) anywhere in the codebase.
+> 7. **No third-party tracking SDKs** — confirm there are no tracking SDKs (Firebase, Mixpanel, Sentry, Amplitude, PostHog, Datadog, Segment, etc.) anywhere in the codebase. Local-only usage counters (UserDefaults) power the in-app Usage report panel — verify they don't make network calls.
 >
 > For each item, check the relevant source files and confirm no `URLSession`, `URLRequest`, or HTTP URL strings exist in the core feature code. List any cloud-connected features separately and confirm they are all opt-in (disabled by default, require user-provided API keys).
 >
@@ -38,7 +38,7 @@ Paste the following prompt into Claude Code (or any AI assistant with codebase a
 | 4 | Meeting transcription & storage | `MeetingSession.swift`, `MeetingTranscript.swift`, `MeetingMarkdownWriter.swift`, `MeetingHistory.swift`, `MeetingTranscriptSettings.swift` | :white_check_mark: Pass — all local file I/O. Markdown written to user-chosen directory. |
 | 5 | OCR & screen capture | `Input/WindowCaptureService.swift`, Vision framework usage | :white_check_mark: Pass — Apple Vision framework, on-device only. |
 | 6 | File storage | `MeetingMarkdownWriter.swift`, `MeetingHistory.swift` | :white_check_mark: Pass — local filesystem only. No iCloud, CloudKit, or remote sync. |
-| 7 | No analytics or telemetry | Entire `GhostPepper/` directory | :white_check_mark: Pass — no Firebase, Mixpanel, Sentry, Amplitude, PostHog, Datadog, or Segment SDKs found. |
+| 7 | No third-party tracking SDKs | Entire `GhostPepper/` directory | :white_check_mark: Pass — no Firebase, Mixpanel, Sentry, Amplitude, PostHog, Datadog, or Segment SDKs found. Local-only usage counters (UserDefaults) power the in-app Usage report panel. |
 
 ### Cloud-connected features (all opt-in)
 

@@ -1,12 +1,17 @@
 import SwiftUI
 
 /// Right-side panel showing what Ghost Pepper does, which model is doing it,
-/// and the full toolkit of local + cloud models. Read-only — downloads,
-/// keychain edits, and model selection happen in Settings.
+/// and the full toolkit of local + cloud models. Local model rows expose
+/// inline download/delete affordances; keychain edits still live in Settings.
 struct ModelsSidebarView: View {
     @AppStorage("speechModel") private var selectedSpeechModelID: String = SpeechModelCatalog.defaultModelID
     @AppStorage("selectedCleanupModelKind") private var selectedCleanupModelKindRaw: String = LocalCleanupModelKind.qwen35_0_8b_q4_k_m.rawValue
     @AppStorage("claudeAPIModel") private var selectedClaudeModelRaw: String = ClaudeAPIModel.sonnet.rawValue
+    @AppStorage("agentBackend") private var selectedAgentBackendRaw: String = "claude:\(ClaudeAPIModel.sonnet.rawValue)"
+
+    @ObservedObject var cleanupManager: TextCleanupManager
+    @ObservedObject var modelManager: ModelManager
+    let onDownloadSpeechModel: (String) -> Void
 
     @State private var refreshTick = 0
 
@@ -105,13 +110,20 @@ struct ModelsSidebarView: View {
             FunctionRowPicker(
                 icon: "cpu",
                 title: "Agent (Q&A · indexing)",
-                location: .cloud,
-                isEmpty: !hasClaudeKey,
+                location: agentBackendIsLocal ? .local : .cloud,
+                isEmpty: !agentBackendIsLocal && !hasClaudeKey,
                 emptyMessage: "Add an API key in Settings → Cross-Meeting Q&A"
             ) {
-                Picker("", selection: $selectedClaudeModelRaw) {
-                    ForEach(ClaudeAPIModel.allCases) { model in
-                        Text(model.shortDisplayName).tag(model.rawValue)
+                Picker("", selection: $selectedAgentBackendRaw) {
+                    Section("Cloud") {
+                        ForEach(ClaudeAPIModel.allCases) { model in
+                            Text(model.shortDisplayName).tag("claude:\(model.rawValue)")
+                        }
+                    }
+                    Section("Local") {
+                        ForEach(LocalCleanupModelKind.allCases) { kind in
+                            Text(localAgentLabel(for: kind)).tag("local:\(kind.rawValue)")
+                        }
                     }
                 }
                 .pickerStyle(.menu)
@@ -136,23 +148,68 @@ struct ModelsSidebarView: View {
     private var localModelsSection: some View {
         section(title: "Local models") {
             ForEach(SpeechModelCatalog.availableModels, id: \.id) { model in
+                let downloaded = ModelManager.isCached(model)
+                let isActive = model.id == selectedSpeechModelID
                 LocalModelRow(
                     title: model.pickerTitle,
                     subtitle: "\(model.variantName) · \(model.sizeDescription)",
                     capabilities: capabilities(for: model),
-                    isDownloaded: ModelManager.isCached(model),
-                    isActive: model.id == selectedSpeechModelID
+                    isDownloaded: downloaded,
+                    isActive: isActive,
+                    progress: speechRowProgress(for: model.id, downloaded: downloaded),
+                    onDownload: downloaded ? nil : { onDownloadSpeechModel(model.id) },
+                    onDelete: (downloaded && !isActive) ? { modelManager.deleteCachedModel(model) } : nil
                 )
             }
             ForEach(TextCleanupManager.cleanupModels, id: \.kind) { desc in
+                let downloaded = TextCleanupManager.isModelDownloaded(desc.kind)
+                let isActive = desc.kind.rawValue == selectedCleanupModelKindRaw
+                let progress = cleanupRowProgress(for: desc.kind, downloaded: downloaded)
                 LocalModelRow(
                     title: desc.displayName,
                     subtitle: desc.sizeDescription,
                     capabilities: ["cleanup", "meeting summary"],
-                    isDownloaded: TextCleanupManager.isModelDownloaded(desc.kind),
-                    isActive: desc.kind.rawValue == selectedCleanupModelKindRaw
+                    isDownloaded: downloaded,
+                    isActive: isActive,
+                    progress: progress,
+                    onDownload: downloaded ? nil : {
+                        cleanupManager.startLoad(kind: desc.kind)
+                    },
+                    onDelete: (downloaded && !isActive) ? {
+                        cleanupManager.deleteCachedModel(kind: desc.kind)
+                    } : nil,
+                    onCancel: (progress != nil && cleanupManager.isLoadCancellable) ? {
+                        cleanupManager.cancelActiveLoad()
+                    } : nil
                 )
             }
+        }
+    }
+
+    /// Inline progress for a speech-model row. The speech `ModelManager` only
+    /// tracks one in-flight download/load at a time and tags it via
+    /// `modelName`, so only the matching row reports a non-nil value.
+    private func speechRowProgress(for modelID: String, downloaded: Bool) -> RowProgress? {
+        guard modelManager.modelName == modelID else { return nil }
+        switch modelManager.state {
+        case .loading:
+            return downloaded ? .loading : .downloading(modelManager.downloadProgress)
+        case .idle, .ready, .error:
+            return nil
+        }
+    }
+
+    /// Inline progress for a cleanup-model row. `TextCleanupManager.state`
+    /// carries the kind for download/load transitions; ready/idle/error don't
+    /// distinguish per-model.
+    private func cleanupRowProgress(for kind: LocalCleanupModelKind, downloaded: Bool) -> RowProgress? {
+        switch cleanupManager.state {
+        case .downloading(let activeKind, let progress) where activeKind == kind:
+            return .downloading(progress)
+        case .loadingModel(let activeKind) where activeKind == kind:
+            return .loading
+        default:
+            return nil
         }
     }
 
@@ -178,7 +235,7 @@ struct ModelsSidebarView: View {
                     subtitle: model.rawValue,
                     capabilities: ["agent (Q&A · indexing)"],
                     isDownloaded: hasClaudeKey,
-                    isActive: hasClaudeKey && model.rawValue == selectedClaudeModelRaw
+                    isActive: hasClaudeKey && agentBackend == .claude(model)
                 )
             }
 
@@ -222,6 +279,24 @@ struct ModelsSidebarView: View {
 
     private var hasClaudeKey: Bool {
         (KeychainHelper.get(AnthropicProvider.keychainKey) ?? "").isEmpty == false
+    }
+
+    /// Resolved agent backend from the persisted setting. Drives both the
+    /// "Agent" function-row icon (cloud/local) and the active-row highlights
+    /// in the Local/Cloud sections below.
+    private var agentBackend: AgentBackend {
+        AgentBackend.decode(selectedAgentBackendRaw) ?? .claude(claudeModel)
+    }
+
+    private var agentBackendIsLocal: Bool { agentBackend.isLocal }
+
+    private func localAgentLabel(for kind: LocalCleanupModelKind) -> String {
+        switch kind {
+        case .qwen35_0_8b_q4_k_m: return "Qwen 3.5 0.8B (local)"
+        case .qwen35_2b_q4_k_m: return "Qwen 3.5 2B (local)"
+        case .qwen35_4b_q4_k_m: return "Qwen 3.5 4B (local)"
+        case .deepseek_r1_qwen_7b_q4_k_m: return "DeepSeek R1 7B (local)"
+        }
     }
 
     private var diarizationLabel: String {
@@ -351,12 +426,24 @@ private struct FunctionRow: View {
     }
 }
 
+/// Per-row download/load progress signal for `LocalModelRow`. `.downloading`
+/// carries an optional fraction so we can show indeterminate spinners while
+/// waiting for the first byte; `.loading` covers the post-download model load.
+enum RowProgress: Equatable {
+    case downloading(Double?)
+    case loading
+}
+
 private struct LocalModelRow: View {
     let title: String
     let subtitle: String
     let capabilities: [String]
     let isDownloaded: Bool
     let isActive: Bool
+    var progress: RowProgress? = nil
+    var onDownload: (() -> Void)? = nil
+    var onDelete: (() -> Void)? = nil
+    var onCancel: (() -> Void)? = nil
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -378,7 +465,7 @@ private struct LocalModelRow: View {
                             .background(Color.orange.opacity(0.15))
                             .cornerRadius(3)
                     }
-                    if !isDownloaded {
+                    if !isDownloaded && progress == nil {
                         Text("not downloaded")
                             .font(.system(size: 9))
                             .foregroundColor(.secondary)
@@ -392,8 +479,74 @@ private struct LocalModelRow: View {
                 Text(capabilities.joined(separator: " · "))
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(.secondary.opacity(0.85))
+                if let progress {
+                    progressView(progress)
+                        .padding(.top, 2)
+                }
             }
-            Spacer()
+            Spacer(minLength: 4)
+            actionButton
+        }
+    }
+
+    @ViewBuilder
+    private var actionButton: some View {
+        if progress != nil, let onCancel {
+            Button(action: onCancel) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .symbolRenderingMode(.hierarchical)
+            }
+            .buttonStyle(.borderless)
+            .help("Cancel download")
+            .padding(.top, 2)
+        } else if progress != nil {
+            ProgressView()
+                .controlSize(.mini)
+                .frame(width: 14, height: 14)
+                .padding(.top, 3)
+        } else if let onDownload, !isDownloaded {
+            Button(action: onDownload) {
+                Image(systemName: "icloud.and.arrow.down")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Download model")
+            .padding(.top, 2)
+        } else if let onDelete {
+            Button(action: onDelete) {
+                Image(systemName: "trash")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.borderless)
+            .help("Remove downloaded model to free disk space")
+            .padding(.top, 2)
+        }
+    }
+
+    @ViewBuilder
+    private func progressView(_ progress: RowProgress) -> some View {
+        switch progress {
+        case .downloading(let value?):
+            HStack(spacing: 6) {
+                ProgressView(value: value)
+                    .progressViewStyle(.linear)
+                    .frame(maxWidth: 140)
+                Text("\(Int(value * 100))%")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+        case .downloading(nil):
+            Text("Preparing…")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
+        case .loading:
+            Text("Loading…")
+                .font(.system(size: 10))
+                .foregroundColor(.secondary)
         }
     }
 }

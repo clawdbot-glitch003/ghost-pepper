@@ -41,7 +41,11 @@ struct MeetingQATools {
         }
 
         let binary = Self.preferredGrepBinary()
-        var args: [String] = ["-r", "-n", "--include=*.md", "--exclude-dir=.git"]
+        // -B/-A include 2 lines before/after each match so weak local models
+        // get context "for free" without needing a follow-up read_file. grep
+        // emits "--" separators between non-adjacent match groups; we split
+        // on those and cap by group count rather than raw line count.
+        var args: [String] = ["-r", "-n", "--include=*.md", "--exclude-dir=.git", "-B", "2", "-A", "2"]
         if caseInsensitive { args.append("-i") }
         args.append("-e")
         args.append(pattern)
@@ -55,22 +59,30 @@ struct MeetingQATools {
             return "No matches found for pattern: \(pattern)"
         }
 
-        let allLines = result.stdout.split(separator: "\n", omittingEmptySubsequences: true).map { String($0) }
-        let totalMatches = allLines.count
+        let allBlocks = result.stdout
+            .components(separatedBy: "\n--\n")
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let totalBlocks = allBlocks.count
         let cap = max(1, min(maxResults, 200))
-        let truncated = allLines.prefix(cap)
-        let rebased = truncated.map { line -> String in
-            if line.hasPrefix(root.path + "/") {
-                return String(line.dropFirst(root.path.count + 1))
-            }
-            return line
+        let truncated = Array(allBlocks.prefix(cap))
+
+        let rebased = truncated.map { block -> String in
+            block.split(separator: "\n", omittingEmptySubsequences: true)
+                .map { line -> String in
+                    let s = String(line)
+                    if s.hasPrefix(root.path + "/") {
+                        return String(s.dropFirst(root.path.count + 1))
+                    }
+                    return s
+                }
+                .joined(separator: "\n")
         }
-        var output = rebased.joined(separator: "\n")
+        var output = rebased.joined(separator: "\n--\n")
         if !output.isEmpty { output += "\n" }
-        if totalMatches > cap {
-            output += "\n(Returned \(cap) matches; max_results was \(cap) and was hit. Increase max_results or narrow scope to see more.)"
+        if totalBlocks > cap {
+            output += "\n(Returned \(cap) of \(totalBlocks) match groups; max_results hit. Increase max_results or narrow the pattern.)"
         } else {
-            output += "\n(Returned \(totalMatches) of \(totalMatches) matches.)"
+            output += "\n(Returned \(totalBlocks) of \(totalBlocks) match groups.)"
         }
         return output
     }

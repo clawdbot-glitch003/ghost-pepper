@@ -30,6 +30,14 @@ struct MeetingMarkdownWriter {
 
     @MainActor
     static func renderMarkdown(transcript: MeetingTranscript) -> String {
+        if let articleBody = transcript.articleBody {
+            return renderReaderMarkdown(transcript: transcript, articleBody: articleBody)
+        }
+        return renderMeetingMarkdown(transcript: transcript)
+    }
+
+    @MainActor
+    private static func renderMeetingMarkdown(transcript: MeetingTranscript) -> String {
         var lines: [String] = []
 
         // Title
@@ -92,6 +100,48 @@ struct MeetingMarkdownWriter {
         return lines.joined(separator: "\n")
     }
 
+    @MainActor
+    private static func renderReaderMarkdown(transcript: MeetingTranscript, articleBody: String) -> String {
+        var lines: [String] = []
+
+        lines.append("---")
+        lines.append("type: reader")
+        if let source = transcript.sourceURL, !source.isEmpty {
+            lines.append("source: \(source)")
+        }
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime]
+        lines.append("fetched: \(iso.string(from: transcript.startDate))")
+        lines.append("---")
+        lines.append("")
+        lines.append("# \(transcript.meetingName)")
+        lines.append("")
+
+        if let source = transcript.sourceURL, let url = URL(string: source), let host = url.host {
+            let dateFmt = DateFormatter()
+            dateFmt.dateStyle = .medium
+            dateFmt.timeStyle = .short
+            lines.append("*From [\(host)](\(source)) · saved \(dateFmt.string(from: transcript.startDate))*")
+            lines.append("")
+        }
+
+        lines.append("## Article")
+        lines.append("")
+        lines.append(articleBody)
+        lines.append("")
+
+        lines.append("## Notes")
+        lines.append("")
+        if transcript.notes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            lines.append("*No notes yet.*")
+        } else {
+            lines.append(transcript.notes)
+        }
+        lines.append("")
+
+        return lines.joined(separator: "\n")
+    }
+
     // MARK: - Parse markdown back into a transcript
 
     /// Parse a meeting markdown file back into a MeetingTranscript for viewing/editing.
@@ -104,13 +154,16 @@ struct MeetingMarkdownWriter {
         var title = fileURL.deletingPathExtension().lastPathComponent
         var notes = ""
         var summary = ""
+        var article = ""
         var importedFrom: String?
+        var sourceURL: String?
         var inFrontmatter = false
         var frontmatterSeen = false
         var inNotes = false
         var inTranscript = false
         var inSummary = false
         var inChapters = false
+        var inArticle = false
         var transcriptLines: [String] = []
 
         for line in lines {
@@ -129,6 +182,9 @@ struct MeetingMarkdownWriter {
                 if line.hasPrefix("imported_from:") {
                     importedFrom = line.replacingOccurrences(of: "imported_from:", with: "").trimmingCharacters(in: .whitespaces)
                 }
+                if line.hasPrefix("source:") {
+                    sourceURL = line.replacingOccurrences(of: "source:", with: "").trimmingCharacters(in: .whitespaces)
+                }
                 continue
             }
 
@@ -138,28 +194,33 @@ struct MeetingMarkdownWriter {
             }
 
             if line == "## Notes" {
-                inNotes = true; inTranscript = false; inSummary = false; inChapters = false
+                inNotes = true; inTranscript = false; inSummary = false; inChapters = false; inArticle = false
                 continue
             }
             if line == "## Transcript" {
-                inNotes = false; inTranscript = true; inSummary = false; inChapters = false
+                inNotes = false; inTranscript = true; inSummary = false; inChapters = false; inArticle = false
                 continue
             }
             if line == "## Summary" {
-                inNotes = false; inTranscript = false; inSummary = true; inChapters = false
+                inNotes = false; inTranscript = false; inSummary = true; inChapters = false; inArticle = false
                 continue
             }
             if line == "## Chapters" {
-                inNotes = false; inTranscript = false; inSummary = false; inChapters = true
+                inNotes = false; inTranscript = false; inSummary = false; inChapters = true; inArticle = false
+                continue
+            }
+            if line == "## Article" {
+                inNotes = false; inTranscript = false; inSummary = false; inChapters = false; inArticle = true
                 continue
             }
             if line.hasPrefix("## ") {
-                inNotes = false; inTranscript = false; inSummary = false; inChapters = false
+                inNotes = false; inTranscript = false; inSummary = false; inChapters = false; inArticle = false
                 continue
             }
 
             if inNotes {
                 if line == "*No notes.*" { continue }
+                if line == "*No notes yet.*" { continue }
                 notes += (notes.isEmpty ? "" : "\n") + line
             }
             if inTranscript {
@@ -171,13 +232,19 @@ struct MeetingMarkdownWriter {
             if inSummary || inChapters {
                 summary += (summary.isEmpty ? "" : "\n") + line
             }
+            if inArticle {
+                article += (article.isEmpty ? "" : "\n") + line
+            }
         }
 
         let transcript = MeetingTranscript(meetingName: title)
         transcript.notes = notes.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
         transcript.summary = trimmedSummary.isEmpty ? nil : trimmedSummary
+        let trimmedArticle = article.trimmingCharacters(in: .whitespacesAndNewlines)
+        transcript.articleBody = trimmedArticle.isEmpty ? nil : trimmedArticle
         transcript.importedFrom = importedFrom
+        transcript.sourceURL = sourceURL
 
         // Parse transcript lines: **[00:00] Me:** text
         for line in transcriptLines {

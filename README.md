@@ -90,7 +90,7 @@ Every core feature runs 100% on your Mac — verified by AI code review. No trus
 | Summary generation | :white_check_mark: Local | Local LLM summarization, no cloud API |
 | OCR & screen capture | :white_check_mark: Local | Apple Vision framework, on-device |
 | File storage | :white_check_mark: Local | Markdown to local filesystem, no cloud sync |
-| Analytics & telemetry | :white_check_mark: None | No Firebase, Mixpanel, Sentry, or any tracking SDK |
+| Analytics & telemetry | :white_check_mark: Local | Local-only usage counters (UserDefaults) power the in-app Usage report panel. No Firebase, Mixpanel, Sentry, or any tracking SDK. |
 
 **Optional cloud features** (disabled by default, require your own API keys): Zo AI chat, Trello integration, Granola meeting import. Model downloads are one-time from Hugging Face.
 
@@ -122,3 +122,11 @@ Ghost Pepper requires Accessibility permission, which normally needs admin acces
 | Bundle ID | `com.github.matthartman.ghostpepper` |
 | Team ID | `BBVMGXR9AY` |
 | Permission | Accessibility (`com.apple.security.accessibility`) |
+
+---
+
+<div align="center">
+
+Matt invests at [factorialcap.com](https://factorialcap.com) — reach out on [X/Twitter](https://x.com/matthartman) if you're a technical founder building something newly technically possible.
+
+</div>

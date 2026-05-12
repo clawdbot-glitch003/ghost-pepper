@@ -25,7 +25,7 @@ struct MenuBarView: View {
             if appState.meetingTranscriptEnabled {
                 Divider()
 
-                Button("Meetings...") {
+                Button("IDE...") {
                     appState.showOrCreateMeetingWindow()
                 }
 

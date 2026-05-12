@@ -41,6 +41,7 @@ final class IndexBuilder {
             generatedAt: Date()
         )
         try? IndexEntryFile.write(entry, to: url)
+        NotificationCenter.default.post(name: .indexEntryWritten, object: kind)
     }
 
     // MARK: - Apply: merge new content into an existing dossier body
@@ -402,7 +403,7 @@ final class IndexBuilder {
         ]
         return MeetingQAAgent(
             provider: provider,
-            model: model,
+            backend: .claude(model),
             systemPrompt: systemPrompt,
             toolHandlers: handlers,
             toolDefinitions: Self.indexingToolDefinitions(),
