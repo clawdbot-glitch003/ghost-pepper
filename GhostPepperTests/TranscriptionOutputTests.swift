@@ -29,10 +29,10 @@ final class TranscriptionOutputTests: XCTestCase {
         XCTAssertEqual(result, .failed("External keyboard bridge failed: No bridge."))
     }
 
-    func testExternalKeyboardBridgeRejectsInvalidPortsWithoutClamping() async {
+    func testNetworkKeyboardBridgeRejectsInvalidPortsWithoutClamping() async {
         var factoryWasCalled = false
         let router = TranscriptionOutputRouter(
-            mode: .externalKeyboardBridge,
+            mode: .networkKeyboardBridge,
             textPaster: TextPaster(),
             bridgeHost: "127.0.0.1",
             bridgePort: 70000,
@@ -46,6 +46,48 @@ final class TranscriptionOutputTests: XCTestCase {
 
         XCTAssertEqual(result, .failed("External keyboard bridge failed: Bridge port must be between 1 and 65535."))
         XCTAssertFalse(factoryWasCalled)
+    }
+
+    func testUSBSerialKeyboardBridgeRejectsEmptySerialPathWithoutOpeningTransport() async {
+        var factoryWasCalled = false
+        let router = TranscriptionOutputRouter(
+            mode: .usbSerialKeyboardBridge,
+            textPaster: TextPaster(),
+            bridgeHost: "127.0.0.1",
+            bridgePort: 8765,
+            bridgeSerialPath: "  ",
+            serialTransportFactory: { _ in
+                factoryWasCalled = true
+                return CapturingBridgeTransport(result: .success(()))
+            }
+        )
+
+        let result = await router.deliver(text: "Hello")
+
+        XCTAssertEqual(result, .failed("External keyboard bridge failed: Serial device path is empty."))
+        XCTAssertFalse(factoryWasCalled)
+    }
+
+    func testUSBSerialKeyboardBridgeRoutesToSerialTransportWithTrimmedPath() async {
+        var capturedPath: String?
+        let transport = CapturingBridgeTransport(result: .success(()))
+        let router = TranscriptionOutputRouter(
+            mode: .usbSerialKeyboardBridge,
+            textPaster: TextPaster(),
+            bridgeHost: "127.0.0.1",
+            bridgePort: 8765,
+            bridgeSerialPath: "  /dev/cu.usbserial-0001\n",
+            serialTransportFactory: { path in
+                capturedPath = path
+                return transport
+            }
+        )
+
+        let result = await router.deliver(text: "Hello")
+
+        XCTAssertEqual(result, .sentToExternalKeyboardBridge)
+        XCTAssertEqual(capturedPath, "/dev/cu.usbserial-0001")
+        XCTAssertNotNil(transport.sentData)
     }
 }
 

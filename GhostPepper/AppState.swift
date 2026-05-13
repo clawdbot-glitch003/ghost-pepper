@@ -87,6 +87,7 @@ class AppState: ObservableObject {
     @AppStorage("meetingSummaryPrompt") var meetingSummaryPrompt: String = MeetingSummaryGenerator.defaultPrompt
     @AppStorage("pauseMediaWhileRecording") var pauseMediaWhileRecording: Bool = true
     @AppStorage("transcriptionOutputMode") var transcriptionOutputModeRawValue: String = TranscriptionOutputMode.localPaste.rawValue
+    @AppStorage("externalKeyboardBridgeSerialPath") var externalKeyboardBridgeSerialPath: String = ""
     @AppStorage("externalKeyboardBridgeHost") var externalKeyboardBridgeHost: String = "127.0.0.1"
     @AppStorage("externalKeyboardBridgePort") var externalKeyboardBridgePort: Int = 8765
     @Published private(set) var pushToTalkChord: KeyChord
@@ -143,7 +144,10 @@ class AppState: ObservableObject {
 
     var transcriptionOutputMode: TranscriptionOutputMode {
         get {
-            TranscriptionOutputMode(rawValue: transcriptionOutputModeRawValue) ?? .localPaste
+            if transcriptionOutputModeRawValue == "externalKeyboardBridge" {
+                return .usbSerialKeyboardBridge
+            }
+            return TranscriptionOutputMode(rawValue: transcriptionOutputModeRawValue) ?? .localPaste
         }
         set {
             objectWillChange.send()
@@ -905,7 +909,8 @@ class AppState: ObservableObject {
                 mode: transcriptionOutputMode,
                 textPaster: textPaster,
                 bridgeHost: externalKeyboardBridgeHost,
-                bridgePort: externalKeyboardBridgePortNumber
+                bridgePort: externalKeyboardBridgePortNumber,
+                bridgeSerialPath: externalKeyboardBridgeSerialPath
             ).deliver(text: finalText)
 
             switch outputResult {

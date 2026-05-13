@@ -657,7 +657,15 @@ struct SettingsView: View {
                         .pickerStyle(.radioGroup)
                     }
 
-                    if appState.transcriptionOutputMode == .externalKeyboardBridge {
+                    if appState.transcriptionOutputMode == .usbSerialKeyboardBridge {
+                        SettingsField("Serial device path") {
+                            TextField("/dev/cu.usbserial-0001 or /dev/cu.SLAB_USBtoUART", text: $appState.externalKeyboardBridgeSerialPath)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: 420)
+                        }
+                    }
+
+                    if appState.transcriptionOutputMode == .networkKeyboardBridge {
                         HStack(alignment: .top, spacing: 16) {
                             SettingsField("Bridge host") {
                                 TextField("127.0.0.1", text: $appState.externalKeyboardBridgeHost)
@@ -678,9 +686,9 @@ struct SettingsView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("External keyboard bridge scaffold")
+                        Text("External keyboard bridge")
                             .font(.subheadline.weight(.medium))
-                        Text("macOS cannot reliably make this Mac appear as a USB HID keyboard in software, and direct macOS BLE HID keyboard output is unsupported/fragile. The practical path is a small bridge device or service (RP2040, ESP32, Pi Zero, etc.) connected or paired to the target laptop. Ghost Pepper sends the final cleaned text to that bridge as one JSON line: {\"type\":\"text\",\"text\":\"…\"}.")
+                        Text("For the ESP32 bridge, plug the ESP32 into this Ghost Pepper Mac over USB, enter its /dev/cu.* serial device path, and pair the ESP32 as a BLE keyboard to the target laptop. Ghost Pepper sends the final cleaned text to the bridge as one JSON line at 115200 baud: {\"type\":\"text\",\"text\":\"…\"}. The network bridge mode keeps the TCP JSON-line scaffold for bridge services.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)

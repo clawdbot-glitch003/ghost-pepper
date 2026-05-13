@@ -8,7 +8,7 @@ The intended hardware path is:
 2. The ESP32 pairs to the target computer as a Bluetooth keyboard.
 3. The ESP32 types the received text via BLE HID.
 
-This directory is the firmware + manual USB-serial test path. The current app scaffold in this PR still emits the same JSON-line command shape over TCP host/port settings; a future app-side serial transport can send those JSON lines directly to the ESP32 USB serial port without changing the firmware protocol.
+This directory contains the firmware and a manual USB-serial test script. The Ghost Pepper app can now send directly to the ESP32 in Settings → General → Output → **USB serial keyboard bridge** by using the board's `/dev/cu.*` serial path at 115200 baud. The same JSON-line protocol is also retained for network bridge services.
 
 > **Important:** Flashing this firmware replaces Meshtastic on the board. Meshtastic cannot stay installed at the same time as this bridge firmware. You can restore Meshtastic later with the official Meshtastic web flasher or CLI flasher.
 
