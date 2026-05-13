@@ -77,6 +77,18 @@ Speech models powered by [WhisperKit](https://github.com/argmaxinc/WhisperKit). 
 | Microphone | Record your voice |
 | Accessibility | Global hotkey and paste via simulated keystrokes |
 
+## Output modes
+
+Ghost Pepper defaults to **Local paste**, which preserves the current behavior: final cleaned text is pasted into the focused app on this Mac.
+
+The **External keyboard bridge** setting is an initial scaffold for using a second Mac to dictate into a company laptop. macOS cannot reliably make a Mac appear as a USB HID keyboard purely in software, and direct macOS BLE HID keyboard output is unsupported/fragile. The recommended path is a small HID bridge device or companion service (for example RP2040, ESP32, or Pi Zero) connected or paired to the target laptop. Ghost Pepper sends final cleaned text to the bridge as a newline-delimited JSON command over TCP:
+
+```json
+{"type":"text","text":"Hello from Ghost Pepper"}
+```
+
+The bridge host and port are configurable in Settings → General → Output. No bridge hardware is required for normal local paste usage.
+
 ## Privacy audit
 
 Every core feature runs 100% on your Mac — verified by AI code review. No trust required, just point Claude at the repo and ask.

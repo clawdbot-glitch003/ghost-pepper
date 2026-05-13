@@ -633,6 +633,61 @@ struct SettingsView: View {
                 }
             }
 
+            SettingsCard("Output") {
+                VStack(alignment: .leading, spacing: 16) {
+                    SettingsField("Transcription delivery") {
+                        Picker(
+                            "Transcription delivery",
+                            selection: Binding(
+                                get: { appState.transcriptionOutputMode },
+                                set: { appState.transcriptionOutputMode = $0 }
+                            )
+                        ) {
+                            ForEach(TranscriptionOutputMode.allCases) { mode in
+                                VStack(alignment: .leading) {
+                                    Text(mode.title)
+                                    Text(mode.description)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .tag(mode)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.radioGroup)
+                    }
+
+                    if appState.transcriptionOutputMode == .externalKeyboardBridge {
+                        HStack(alignment: .top, spacing: 16) {
+                            SettingsField("Bridge host") {
+                                TextField("127.0.0.1", text: $appState.externalKeyboardBridgeHost)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(maxWidth: 220)
+                            }
+
+                            SettingsField("Bridge port") {
+                                TextField(
+                                    "8765",
+                                    value: $appState.externalKeyboardBridgePort,
+                                    formatter: NumberFormatter()
+                                )
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 96)
+                            }
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("External keyboard bridge scaffold")
+                            .font(.subheadline.weight(.medium))
+                        Text("macOS cannot reliably make this Mac appear as a USB HID keyboard in software, and direct macOS BLE HID keyboard output is unsupported/fragile. The practical path is a small bridge device or service (RP2040, ESP32, Pi Zero, etc.) connected or paired to the target laptop. Ghost Pepper sends the final cleaned text to that bridge as one JSON line: {\"type\":\"text\",\"text\":\"…\"}.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
             SettingsCard("Test dictation") {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Record a short sample with your current microphone and speech model without leaving Settings.")

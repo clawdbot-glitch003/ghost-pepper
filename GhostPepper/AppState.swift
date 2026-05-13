@@ -86,6 +86,9 @@ class AppState: ObservableObject {
     @AppStorage("meetingWindowFloatsWhileRecording") var meetingWindowFloatsWhileRecording: Bool = true
     @AppStorage("meetingSummaryPrompt") var meetingSummaryPrompt: String = MeetingSummaryGenerator.defaultPrompt
     @AppStorage("pauseMediaWhileRecording") var pauseMediaWhileRecording: Bool = true
+    @AppStorage("transcriptionOutputMode") var transcriptionOutputModeRawValue: String = TranscriptionOutputMode.localPaste.rawValue
+    @AppStorage("externalKeyboardBridgeHost") var externalKeyboardBridgeHost: String = "127.0.0.1"
+    @AppStorage("externalKeyboardBridgePort") var externalKeyboardBridgePort: Int = 8765
     @Published private(set) var pushToTalkChord: KeyChord
     @Published private(set) var toggleToTalkChord: KeyChord
     @Published private(set) var pepperChatChord: KeyChord
@@ -137,6 +140,20 @@ class AppState: ObservableObject {
     var cleanedTranscriptionResultOverride: ((String, OCRContext?) async -> CleanupResult)?
     private(set) var activeRecordingSessionCoordinator: RecordingSessionCoordinator?
     private(set) var activeRecordingTranscriptionSession: RecordingTranscriptionSession?
+
+    var transcriptionOutputMode: TranscriptionOutputMode {
+        get {
+            TranscriptionOutputMode(rawValue: transcriptionOutputModeRawValue) ?? .localPaste
+        }
+        set {
+            objectWillChange.send()
+            transcriptionOutputModeRawValue = newValue.rawValue
+        }
+    }
+
+    var externalKeyboardBridgePortNumber: UInt16 {
+        UInt16(clamping: externalKeyboardBridgePort)
+    }
 
     var isReady: Bool {
         status == .ready
@@ -882,9 +899,21 @@ class AppState: ObservableObject {
         }
 
         if shouldPaste {
-            let pasteResult = textPaster.paste(text: finalText)
-            if pasteResult == .copiedToClipboard {
+            let outputResult = TranscriptionOutputRouter(
+                mode: transcriptionOutputMode,
+                textPaster: textPaster,
+                bridgeHost: externalKeyboardBridgeHost,
+                bridgePort: externalKeyboardBridgePortNumber
+            ).deliver(text: finalText)
+
+            switch outputResult {
+            case .copiedToClipboard:
                 showClipboardFallbackMessage()
+            case .failed(let message):
+                errorMessage = message
+                status = .error
+            case .pasted, .sentToExternalKeyboardBridge:
+                break
             }
         }
 
