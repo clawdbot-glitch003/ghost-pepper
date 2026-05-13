@@ -913,7 +913,10 @@ class AppState: ObservableObject {
                 showClipboardFallbackMessage()
             case .failed(let message):
                 errorMessage = message
-                status = .error
+                // Delivery failures should be visible but non-fatal. The user may be
+                // configuring a bridge that is currently offline; keep dictation usable
+                // so they can switch back to local paste or try again after fixing it.
+                status = .ready
             case .pasted, .sentToExternalKeyboardBridge:
                 break
             }
