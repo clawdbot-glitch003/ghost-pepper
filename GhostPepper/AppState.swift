@@ -151,8 +151,8 @@ class AppState: ObservableObject {
         }
     }
 
-    var externalKeyboardBridgePortNumber: UInt16 {
-        UInt16(clamping: externalKeyboardBridgePort)
+    var externalKeyboardBridgePortNumber: Int {
+        externalKeyboardBridgePort
     }
 
     var isReady: Bool {
@@ -796,7 +796,9 @@ class AppState: ObservableObject {
             completeActivePerformanceTraceIfNeeded()
         }
 
-        status = .ready
+        if status != .error {
+            status = .ready
+        }
         releasePipeline(owner: .liveRecording)
     }
 
@@ -899,7 +901,7 @@ class AppState: ObservableObject {
         }
 
         if shouldPaste {
-            let outputResult = TranscriptionOutputRouter(
+            let outputResult = await TranscriptionOutputRouter(
                 mode: transcriptionOutputMode,
                 textPaster: textPaster,
                 bridgeHost: externalKeyboardBridgeHost,

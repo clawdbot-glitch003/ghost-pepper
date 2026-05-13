@@ -35,13 +35,13 @@ enum TranscriptionOutputResult: Equatable {
 }
 
 protocol TranscriptionOutputTarget {
-    func deliver(text: String) -> TranscriptionOutputResult
+    func deliver(text: String) async -> TranscriptionOutputResult
 }
 
 struct LocalPasteOutputTarget: TranscriptionOutputTarget {
     let textPaster: TextPaster
 
-    func deliver(text: String) -> TranscriptionOutputResult {
+    func deliver(text: String) async -> TranscriptionOutputResult {
         switch textPaster.paste(text: text) {
         case .pasted:
             return .pasted
@@ -62,7 +62,7 @@ struct ExternalKeyboardBridgeCommand: Encodable, Equatable {
 }
 
 protocol ExternalKeyboardBridgeTransport {
-    func sendJSONLine(_ data: Data) -> Result<Void, Error>
+    func sendJSONLine(_ data: Data) async -> Result<Void, Error>
 }
 
 struct TCPExternalKeyboardBridgeTransport: ExternalKeyboardBridgeTransport {
@@ -76,7 +76,7 @@ struct TCPExternalKeyboardBridgeTransport: ExternalKeyboardBridgeTransport {
         self.timeout = timeout
     }
 
-    func sendJSONLine(_ data: Data) -> Result<Void, Error> {
+    func sendJSONLine(_ data: Data) async -> Result<Void, Error> {
         guard !host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return .failure(ExternalKeyboardBridgeError.invalidConfiguration("Bridge host is empty."))
         }
@@ -91,8 +91,11 @@ struct TCPExternalKeyboardBridgeTransport: ExternalKeyboardBridgeTransport {
             using: .tcp
         )
         let queue = DispatchQueue(label: "GhostPepper.ExternalKeyboardBridgeTransport")
-        let semaphore = DispatchSemaphore(value: 0)
         let sendState = ExternalKeyboardBridgeSendState()
+        let timeoutWorkItem = DispatchWorkItem {
+            sendState.finish(.failure(ExternalKeyboardBridgeError.timeout))
+            connection.cancel()
+        }
 
         connection.stateUpdateHandler = { state in
             switch state {
@@ -103,25 +106,23 @@ struct TCPExternalKeyboardBridgeTransport: ExternalKeyboardBridgeTransport {
                     } else {
                         sendState.finish(.success(()))
                     }
+                    timeoutWorkItem.cancel()
                     connection.cancel()
-                    semaphore.signal()
                 })
             case .failed(let error):
                 sendState.finish(.failure(error))
+                timeoutWorkItem.cancel()
                 connection.cancel()
-                semaphore.signal()
             default:
                 break
             }
         }
 
-        connection.start(queue: queue)
-        if semaphore.wait(timeout: .now() + timeout) == .timedOut {
-            connection.cancel()
-            return .failure(ExternalKeyboardBridgeError.timeout)
+        return await withCheckedContinuation { continuation in
+            sendState.setContinuation(continuation)
+            queue.asyncAfter(deadline: .now() + timeout, execute: timeoutWorkItem)
+            connection.start(queue: queue)
         }
-
-        return sendState.result ?? .failure(ExternalKeyboardBridgeError.unknown)
     }
 }
 
@@ -129,6 +130,7 @@ private final class ExternalKeyboardBridgeSendState: @unchecked Sendable {
     private let lock = NSLock()
     private var hasStartedSend = false
     private var storedResult: Result<Void, Error>?
+    private var continuation: CheckedContinuation<Result<Void, Error>, Never>?
 
     var result: Result<Void, Error>? {
         lock.lock()
@@ -145,9 +147,33 @@ private final class ExternalKeyboardBridgeSendState: @unchecked Sendable {
     }
 
     func finish(_ result: Result<Void, Error>) {
+        let continuationToResume: CheckedContinuation<Result<Void, Error>, Never>?
         lock.lock()
+        guard storedResult == nil else {
+            lock.unlock()
+            return
+        }
         storedResult = result
+        continuationToResume = continuation
+        continuation = nil
         lock.unlock()
+        continuationToResume?.resume(returning: result)
+    }
+
+    func setContinuation(_ continuation: CheckedContinuation<Result<Void, Error>, Never>) {
+        let resultToResume: Result<Void, Error>?
+        lock.lock()
+        if let storedResult {
+            resultToResume = storedResult
+        } else {
+            self.continuation = continuation
+            resultToResume = nil
+        }
+        lock.unlock()
+
+        if let resultToResume {
+            continuation.resume(returning: resultToResume)
+        }
     }
 }
 
@@ -160,11 +186,11 @@ struct ExternalKeyboardBridgeOutputTarget: TranscriptionOutputTarget {
         self.encoder = encoder
     }
 
-    func deliver(text: String) -> TranscriptionOutputResult {
+    func deliver(text: String) async -> TranscriptionOutputResult {
         do {
             var data = try encoder.encode(ExternalKeyboardBridgeCommand(text: text))
             data.append(0x0A)
-            switch transport.sendJSONLine(data) {
+            switch await transport.sendJSONLine(data) {
             case .success:
                 return .sentToExternalKeyboardBridge
             case .failure(let error):
@@ -197,14 +223,14 @@ struct TranscriptionOutputRouter {
     let mode: TranscriptionOutputMode
     let textPaster: TextPaster
     let bridgeHost: String
-    let bridgePort: UInt16
+    let bridgePort: Int
     let bridgeTransportFactory: (String, UInt16) -> ExternalKeyboardBridgeTransport
 
     init(
         mode: TranscriptionOutputMode,
         textPaster: TextPaster,
         bridgeHost: String,
-        bridgePort: UInt16,
+        bridgePort: Int,
         bridgeTransportFactory: @escaping (String, UInt16) -> ExternalKeyboardBridgeTransport = { host, port in
             TCPExternalKeyboardBridgeTransport(host: host, port: port)
         }
@@ -216,13 +242,16 @@ struct TranscriptionOutputRouter {
         self.bridgeTransportFactory = bridgeTransportFactory
     }
 
-    func deliver(text: String) -> TranscriptionOutputResult {
+    func deliver(text: String) async -> TranscriptionOutputResult {
         switch mode {
         case .localPaste:
-            return LocalPasteOutputTarget(textPaster: textPaster).deliver(text: text)
+            return await LocalPasteOutputTarget(textPaster: textPaster).deliver(text: text)
         case .externalKeyboardBridge:
-            let transport = bridgeTransportFactory(bridgeHost, bridgePort)
-            return ExternalKeyboardBridgeOutputTarget(transport: transport).deliver(text: text)
+            guard (1...65535).contains(bridgePort) else {
+                return .failed("External keyboard bridge failed: Bridge port must be between 1 and 65535.")
+            }
+            let transport = bridgeTransportFactory(bridgeHost, UInt16(bridgePort))
+            return await ExternalKeyboardBridgeOutputTarget(transport: transport).deliver(text: text)
         }
     }
 }

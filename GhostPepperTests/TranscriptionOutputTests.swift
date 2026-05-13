@@ -2,11 +2,11 @@ import XCTest
 @testable import GhostPepper
 
 final class TranscriptionOutputTests: XCTestCase {
-    func testExternalKeyboardBridgeEncodesTextCommandAsJSONLine() throws {
+    func testExternalKeyboardBridgeEncodesTextCommandAsJSONLine() async throws {
         let transport = CapturingBridgeTransport(result: .success(()))
         let target = ExternalKeyboardBridgeOutputTarget(transport: transport)
 
-        let result = target.deliver(text: "Hello \"bridge\" 🌶️")
+        let result = await target.deliver(text: "Hello \"bridge\" 🌶️")
 
         XCTAssertEqual(result, .sentToExternalKeyboardBridge)
         let sentData = try XCTUnwrap(transport.sentData)
@@ -18,15 +18,34 @@ final class TranscriptionOutputTests: XCTestCase {
         XCTAssertEqual(object?["text"], "Hello \"bridge\" 🌶️")
     }
 
-    func testExternalKeyboardBridgeReportsTransportFailure() {
+    func testExternalKeyboardBridgeReportsTransportFailure() async {
         let transport = CapturingBridgeTransport(
             result: .failure(ExternalKeyboardBridgeError.invalidConfiguration("No bridge."))
         )
         let target = ExternalKeyboardBridgeOutputTarget(transport: transport)
 
-        let result = target.deliver(text: "Hello")
+        let result = await target.deliver(text: "Hello")
 
         XCTAssertEqual(result, .failed("External keyboard bridge failed: No bridge."))
+    }
+
+    func testExternalKeyboardBridgeRejectsInvalidPortsWithoutClamping() async {
+        var factoryWasCalled = false
+        let router = TranscriptionOutputRouter(
+            mode: .externalKeyboardBridge,
+            textPaster: TextPaster(),
+            bridgeHost: "127.0.0.1",
+            bridgePort: 70000,
+            bridgeTransportFactory: { _, _ in
+                factoryWasCalled = true
+                return CapturingBridgeTransport(result: .success(()))
+            }
+        )
+
+        let result = await router.deliver(text: "Hello")
+
+        XCTAssertEqual(result, .failed("External keyboard bridge failed: Bridge port must be between 1 and 65535."))
+        XCTAssertFalse(factoryWasCalled)
     }
 }
 
@@ -38,7 +57,7 @@ private final class CapturingBridgeTransport: ExternalKeyboardBridgeTransport {
         self.result = result
     }
 
-    func sendJSONLine(_ data: Data) -> Result<Void, Error> {
+    func sendJSONLine(_ data: Data) async -> Result<Void, Error> {
         sentData = data
         return result
     }
