@@ -633,6 +633,69 @@ struct SettingsView: View {
                 }
             }
 
+            SettingsCard("Output") {
+                VStack(alignment: .leading, spacing: 16) {
+                    SettingsField("Transcription delivery") {
+                        Picker(
+                            "Transcription delivery",
+                            selection: Binding(
+                                get: { appState.transcriptionOutputMode },
+                                set: { appState.transcriptionOutputMode = $0 }
+                            )
+                        ) {
+                            ForEach(TranscriptionOutputMode.allCases) { mode in
+                                VStack(alignment: .leading) {
+                                    Text(mode.title)
+                                    Text(mode.description)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .tag(mode)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.radioGroup)
+                    }
+
+                    if appState.transcriptionOutputMode == .usbSerialKeyboardBridge {
+                        SettingsField("Serial device path") {
+                            TextField("/dev/cu.usbserial-0001 or /dev/cu.SLAB_USBtoUART", text: $appState.externalKeyboardBridgeSerialPath)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: 420)
+                        }
+                    }
+
+                    if appState.transcriptionOutputMode == .networkKeyboardBridge {
+                        HStack(alignment: .top, spacing: 16) {
+                            SettingsField("Bridge host") {
+                                TextField("127.0.0.1", text: $appState.externalKeyboardBridgeHost)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(maxWidth: 220)
+                            }
+
+                            SettingsField("Bridge port") {
+                                TextField(
+                                    "8765",
+                                    value: $appState.externalKeyboardBridgePort,
+                                    formatter: NumberFormatter()
+                                )
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 96)
+                            }
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("External keyboard bridge")
+                            .font(.subheadline.weight(.medium))
+                        Text("For the ESP32 bridge, plug the ESP32 into this Ghost Pepper Mac over USB, enter its /dev/cu.* serial device path, and pair the ESP32 as a BLE keyboard to the target laptop. Ghost Pepper sends the final cleaned text to the bridge as one JSON line at 115200 baud: {\"type\":\"text\",\"text\":\"…\"}. The network bridge mode keeps the TCP JSON-line scaffold for bridge services.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
             SettingsCard("Test dictation") {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("Record a short sample with your current microphone and speech model without leaving Settings.")

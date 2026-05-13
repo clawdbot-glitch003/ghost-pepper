@@ -86,6 +86,10 @@ class AppState: ObservableObject {
     @AppStorage("meetingWindowFloatsWhileRecording") var meetingWindowFloatsWhileRecording: Bool = true
     @AppStorage("meetingSummaryPrompt") var meetingSummaryPrompt: String = MeetingSummaryGenerator.defaultPrompt
     @AppStorage("pauseMediaWhileRecording") var pauseMediaWhileRecording: Bool = true
+    @AppStorage("transcriptionOutputMode") var transcriptionOutputModeRawValue: String = TranscriptionOutputMode.localPaste.rawValue
+    @AppStorage("externalKeyboardBridgeSerialPath") var externalKeyboardBridgeSerialPath: String = ""
+    @AppStorage("externalKeyboardBridgeHost") var externalKeyboardBridgeHost: String = "127.0.0.1"
+    @AppStorage("externalKeyboardBridgePort") var externalKeyboardBridgePort: Int = 8765
     @Published private(set) var pushToTalkChord: KeyChord
     @Published private(set) var toggleToTalkChord: KeyChord
     @Published private(set) var pepperChatChord: KeyChord
@@ -137,6 +141,23 @@ class AppState: ObservableObject {
     var cleanedTranscriptionResultOverride: ((String, OCRContext?) async -> CleanupResult)?
     private(set) var activeRecordingSessionCoordinator: RecordingSessionCoordinator?
     private(set) var activeRecordingTranscriptionSession: RecordingTranscriptionSession?
+
+    var transcriptionOutputMode: TranscriptionOutputMode {
+        get {
+            if transcriptionOutputModeRawValue == "externalKeyboardBridge" {
+                return .usbSerialKeyboardBridge
+            }
+            return TranscriptionOutputMode(rawValue: transcriptionOutputModeRawValue) ?? .localPaste
+        }
+        set {
+            objectWillChange.send()
+            transcriptionOutputModeRawValue = newValue.rawValue
+        }
+    }
+
+    var externalKeyboardBridgePortNumber: Int {
+        externalKeyboardBridgePort
+    }
 
     var isReady: Bool {
         status == .ready
@@ -779,7 +800,9 @@ class AppState: ObservableObject {
             completeActivePerformanceTraceIfNeeded()
         }
 
-        status = .ready
+        if status != .error {
+            status = .ready
+        }
         releasePipeline(owner: .liveRecording)
     }
 
@@ -882,9 +905,25 @@ class AppState: ObservableObject {
         }
 
         if shouldPaste {
-            let pasteResult = textPaster.paste(text: finalText)
-            if pasteResult == .copiedToClipboard {
+            let outputResult = await TranscriptionOutputRouter(
+                mode: transcriptionOutputMode,
+                textPaster: textPaster,
+                bridgeHost: externalKeyboardBridgeHost,
+                bridgePort: externalKeyboardBridgePortNumber,
+                bridgeSerialPath: externalKeyboardBridgeSerialPath
+            ).deliver(text: finalText)
+
+            switch outputResult {
+            case .copiedToClipboard:
                 showClipboardFallbackMessage()
+            case .failed(let message):
+                errorMessage = message
+                // Delivery failures should be visible but non-fatal. The user may be
+                // configuring a bridge that is currently offline; keep dictation usable
+                // so they can switch back to local paste or try again after fixing it.
+                status = .ready
+            case .pasted, .sentToExternalKeyboardBridge:
+                break
             }
         }
 

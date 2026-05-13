@@ -77,6 +77,18 @@ Speech models powered by [WhisperKit](https://github.com/argmaxinc/WhisperKit). 
 | Microphone | Record your voice |
 | Accessibility | Global hotkey and paste via simulated keystrokes |
 
+## Output modes
+
+Ghost Pepper defaults to **Local paste**, which preserves the current behavior: final cleaned text is pasted into the focused app on this Mac.
+
+The **USB serial keyboard bridge** mode lets a second Mac dictate into a company laptop through the ESP32 BLE keyboard bridge. Plug the ESP32 into the Ghost Pepper Mac over USB, pair the ESP32 to the target laptop as a BLE keyboard, and enter the ESP32 `/dev/cu.*` serial device path in Settings → General → Output (for example `/dev/cu.usbserial-0001` or `/dev/cu.SLAB_USBtoUART`). Ghost Pepper sends final cleaned text at 115200 baud as newline-delimited JSON:
+
+```json
+{"type":"text","text":"Hello from Ghost Pepper"}
+```
+
+The **Network keyboard bridge** mode preserves the TCP JSON-line scaffold for companion bridge services with configurable host/port. No bridge hardware is required for normal local paste usage.
+
 ## Privacy audit
 
 Every core feature runs 100% on your Mac — verified by AI code review. No trust required, just point Claude at the repo and ask.
